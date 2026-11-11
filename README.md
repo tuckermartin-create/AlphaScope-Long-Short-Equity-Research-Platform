@@ -11,7 +11,8 @@ exposure and its simulated profit or loss. A second tab screens a single stock
 by comparing its price with the user's own fair-value estimate.
 
 All prices are entered by the user, so the app works instantly without
-downloading market data. It is a learning tool, not an investment
+downloading market data. The only part that uses the internet is the optional
+portfolio news section. It is a learning tool, not an investment
 recommendation.
 
 **Intended users:** College students, student investment clubs, beginner
@@ -34,6 +35,11 @@ investors, and aspiring equity research analysts.
   and get rule-based suggestions for what kind of position to add next.
 - Test a specific new stock: see net and gross exposure after adding it and
   whether it fits the goal, the exposure limit, and your fair-value estimate.
+- Turn on portfolio news to read recent Yahoo Finance headlines for the stocks
+  you hold, filtered by stock and number of headlines. Headlines load only on
+  request and are cached for 15 minutes so the app stays fast.
+- Start from a 12-position sample portfolio (8 longs, 4 shorts) with
+  placeholder prices that you can replace with your own.
 
 **Stock valuation screen**
 
@@ -44,7 +50,7 @@ investors, and aspiring equity research analysts.
 
 ## Planned features
 
-- Optional on-demand market data for the stocks in the portfolio, with caching
+- Optional on-demand price data for the stocks in the portfolio, with caching
   and clear handling of slow or unavailable data sources.
 - Historical price and portfolio performance charts.
 - Financial ratio analysis and company comparisons.

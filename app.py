@@ -1,5 +1,41 @@
+from email.utils import parsedate_to_datetime
+import urllib.request
+import xml.etree.ElementTree as ET
+
 import pandas as pd
 import streamlit as st
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_news(ticker):
+    """Return recent headlines for one ticker from Yahoo Finance's news feed.
+
+    Results are cached for 15 minutes so the feed is not downloaded again
+    every time a widget changes.
+    """
+    url = (
+        "https://feeds.finance.yahoo.com/rss/2.0/headline"
+        f"?s={ticker}&region=US&lang=en-US"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        feed = ET.fromstring(response.read())
+
+    articles = []
+    for item in feed.iter("item"):
+        published = item.findtext("pubDate", default="")
+        try:
+            published = parsedate_to_datetime(published).strftime("%b %d, %Y")
+        except (TypeError, ValueError):
+            pass
+        articles.append(
+            {
+                "title": item.findtext("title", default="Untitled"),
+                "link": item.findtext("link", default=""),
+                "published": published,
+            }
+        )
+    return articles
 
 
 st.set_page_config(
@@ -11,13 +47,14 @@ st.set_page_config(
 st.title("AlphaScope — Long/Short Equity Research Platform")
 st.write(
     "Build a hypothetical long/short stock portfolio and see its exposure and "
-    "simulated profit or loss, or screen a single stock against your own "
-    "fair-value estimate. All prices are entered by you, so nothing is "
-    "downloaded and the app responds instantly."
+    "simulated profit or loss, get suggestions for the next position, read "
+    "news on your holdings, or screen a single stock against your own "
+    "fair-value estimate. All prices are entered by you, so the app responds "
+    "instantly."
 )
 st.caption(
-    "AlphaScope is an educational simulator. It does not use live market data "
-    "and does not give investment recommendations."
+    "AlphaScope is an educational simulator. Prices are not live market data, "
+    "and its suggestions are not verified investment advice."
 )
 
 portfolio_tab, valuation_tab = st.tabs(["Portfolio builder", "Stock valuation screen"])
@@ -59,13 +96,26 @@ with portfolio_tab:
         "to add a stock, or select a row and press Delete to remove one."
     )
 
+    # Sample positions with placeholder prices. Replace them with your own.
     starting_positions = pd.DataFrame(
         {
-            "Ticker": ["MSFT", "AAPL", "TSLA"],
-            "Side": ["Long", "Long", "Short"],
-            "Weight (%)": [35.0, 35.0, 30.0],
-            "Entry price ($)": [400.0, 200.0, 250.0],
-            "Current price ($)": [420.0, 210.0, 240.0],
+            "Ticker": [
+                "MSFT", "AAPL", "NVDA", "GOOGL", "AMZN", "JPM", "XOM", "COST",
+                "TSLA", "INTC", "NKE", "PFE",
+            ],
+            "Side": [
+                "Long", "Long", "Long", "Long", "Long", "Long", "Long", "Long",
+                "Short", "Short", "Short", "Short",
+            ],
+            "Weight (%)": [12.0, 10.0, 10.0, 8.0, 8.0, 7.0, 5.0, 5.0, 10.0, 7.0, 7.0, 6.0],
+            "Entry price ($)": [
+                400.0, 200.0, 120.0, 160.0, 180.0, 210.0, 110.0, 850.0,
+                250.0, 30.0, 80.0, 28.0,
+            ],
+            "Current price ($)": [
+                420.0, 210.0, 135.0, 172.0, 174.0, 225.0, 108.0, 900.0,
+                240.0, 26.0, 84.0, 27.0,
+            ],
         }
     )
 
@@ -371,6 +421,50 @@ with portfolio_tab:
             "These suggestions come from simple rules applied to the numbers you "
             "entered. They are for learning, not verified investment advice."
         )
+
+        # -------------------------------------------------------------------
+        # News for the stocks in the portfolio
+        # -------------------------------------------------------------------
+        st.header("4. Portfolio news")
+        st.write(
+            "See recent headlines for the stocks you hold. News is the only part "
+            "of AlphaScope that uses the internet, so it loads only when you turn "
+            "it on."
+        )
+
+        show_news = st.toggle("Show news for my portfolio")
+        if show_news:
+            portfolio_tickers = list(dict.fromkeys(positions["Ticker"]))
+            filter_column, count_column = st.columns(2)
+            with filter_column:
+                news_tickers = st.multiselect(
+                    "Stocks to show news for",
+                    portfolio_tickers,
+                    default=portfolio_tickers,
+                )
+            with count_column:
+                headlines_per_stock = st.slider(
+                    "Headlines per stock", min_value=1, max_value=5, value=3
+                )
+
+            side_by_ticker = dict(zip(positions["Ticker"], positions["Side"]))
+            with st.spinner("Loading headlines..."):
+                for news_ticker in news_tickers:
+                    st.subheader(f"{news_ticker} ({side_by_ticker[news_ticker]})")
+                    try:
+                        articles = fetch_news(news_ticker)
+                    except Exception:
+                        # A slow or unavailable feed should not break the app.
+                        st.warning(f"News for {news_ticker} could not be loaded right now.")
+                        continue
+                    if not articles:
+                        st.write("No recent headlines found.")
+                    for article in articles[:headlines_per_stock]:
+                        st.markdown(
+                            f"- [{article['title']}]({article['link']}) "
+                            f"· {article['published']}"
+                        )
+            st.caption("Headlines come from Yahoo Finance and refresh every 15 minutes.")
 
 
 # ---------------------------------------------------------------------------
