@@ -30,6 +30,10 @@ investors, and aspiring equity research analysts.
 - Read a plain-language summary of whether the portfolio is net long, net
   short, or close to market neutral.
 - View a bar chart of exposure by position.
+- Choose a portfolio goal (market neutral, moderately net long, or net long)
+  and get rule-based suggestions for what kind of position to add next.
+- Test a specific new stock: see net and gross exposure after adding it and
+  whether it fits the goal, the exposure limit, and your fair-value estimate.
 
 **Stock valuation screen**
 

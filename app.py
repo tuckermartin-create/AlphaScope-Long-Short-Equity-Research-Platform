@@ -189,6 +189,189 @@ with portfolio_tab:
                 },
             )
 
+        # -------------------------------------------------------------------
+        # Suggestions based on the current portfolio
+        # -------------------------------------------------------------------
+        st.header("3. Suggestions for the next position")
+        st.write(
+            "Choose what you want the portfolio to look like. AlphaScope compares "
+            "that goal with your current positions and suggests what kind of "
+            "position to add next."
+        )
+
+        goals = {
+            "Market neutral (net exposure near 0%)": 0,
+            "Moderately net long (net exposure near +30%)": 30,
+            "Net long (net exposure near +60%)": 60,
+        }
+        goal = st.selectbox("Portfolio goal", list(goals.keys()), index=1)
+        target_net = goals[goal]
+
+        net_gap = target_net - net_exposure
+        headroom = gross_limit - gross_exposure
+        suggestions = []
+
+        # 1. Which side to add, and how much, to reach the goal.
+        if net_gap > 5:
+            suggestions.append(
+                f"**Add long exposure.** Net exposure is {net_exposure:+.1f}% and "
+                f"your goal is {target_net:+d}%. About {net_gap:.0f}% of new long "
+                "positions would close the gap."
+            )
+        elif net_gap < -5:
+            suggestions.append(
+                f"**Add short exposure.** Net exposure is {net_exposure:+.1f}% and "
+                f"your goal is {target_net:+d}%. About {abs(net_gap):.0f}% of new "
+                "short positions would close the gap."
+            )
+        else:
+            suggestions.append(
+                f"**Keep new positions balanced.** Net exposure of "
+                f"{net_exposure:+.1f}% is already close to your {target_net:+d}% "
+                "goal, so pair any new long with a short of similar size."
+            )
+
+        # 2. Whether there is room to add anything under the gross limit.
+        if headroom <= 0:
+            suggestions.append(
+                "**Trim before adding.** The portfolio is at or above its gross "
+                "exposure limit, so an existing position must shrink to make room."
+            )
+        elif abs(net_gap) > headroom:
+            suggestions.append(
+                f"**Room is limited.** Only {headroom:.0f}% of gross exposure is "
+                "left under your limit, which is less than the gap to your goal. "
+                "Reduce a position on the other side instead of only adding."
+            )
+        else:
+            suggestions.append(
+                f"**Room available.** You can add up to {headroom:.0f}% of new "
+                "positions before reaching your gross exposure limit."
+            )
+
+        # 3. Missing hedge.
+        if short_exposure == 0:
+            suggestions.append(
+                "**No hedge.** The portfolio has no short positions, so nothing "
+                "offsets a broad market decline."
+            )
+        elif long_exposure == 0:
+            suggestions.append(
+                "**No longs.** The portfolio has only short positions, so nothing "
+                "offsets a broad market rally."
+            )
+
+        # 4. Concentration in a single position.
+        largest = positions.loc[positions["Weight (%)"].idxmax()]
+        if gross_exposure > 0 and largest["Weight (%)"] / gross_exposure > 0.4:
+            suggestions.append(
+                f"**Diversify.** {largest['Ticker']} is {largest['Weight (%)']:.0f}% "
+                "of capital, more than 40% of total exposure. Prefer a new ticker "
+                "over adding to it."
+            )
+
+        # 5. Positions that are losing money.
+        losers = positions[positions["Return (%)"] <= -10]
+        if not losers.empty:
+            suggestions.append(
+                f"**Review losing positions.** {', '.join(losers['Ticker'])} "
+                "is down 10% or more. Decide whether the original reason for the "
+                "position still holds before adding new ones."
+            )
+
+        for suggestion in suggestions:
+            st.markdown(f"- {suggestion}")
+
+        # -------------------------------------------------------------------
+        # Test a specific new position against the current portfolio
+        # -------------------------------------------------------------------
+        st.subheader("Test a new position")
+        st.write(
+            "Enter a stock you are thinking about adding. AlphaScope shows how it "
+            "would change the portfolio and whether it fits your goal."
+        )
+
+        idea_columns = st.columns(5)
+        new_ticker = idea_columns[0].text_input("New ticker", value="NVDA").strip().upper()
+        new_side = idea_columns[1].radio("Side", ["Long", "Short"], horizontal=True)
+        new_weight = idea_columns[2].number_input(
+            "Weight (%)", min_value=1.0, max_value=100.0, value=10.0, step=1.0
+        )
+        new_price = idea_columns[3].number_input(
+            "Current price ($)", min_value=0.01, value=100.0, step=1.0, format="%.2f",
+            key="new_price",
+        )
+        new_fair_value = idea_columns[4].number_input(
+            "Your fair value ($)", min_value=0.01, value=120.0, step=1.0, format="%.2f",
+            key="new_fair_value",
+            help="What you estimate one share is worth.",
+        )
+
+        new_direction = 1 if new_side == "Long" else -1
+        new_net = net_exposure + new_direction * new_weight
+        new_gross = gross_exposure + new_weight
+        new_gap = round((new_fair_value / new_price - 1) * 100, 10)
+
+        # Three checks: stays under the limit, moves toward the goal, and the
+        # user's own valuation agrees with the chosen side.
+        within_limit = new_gross <= gross_limit
+        closer_to_goal = abs(target_net - new_net) < abs(target_net - net_exposure)
+        valuation_agrees = new_direction * new_gap >= 10
+
+        after_columns = st.columns(3)
+        after_columns[0].metric(
+            "Net exposure after", f"{new_net:+.1f}%", f"{new_direction * new_weight:+.1f}%",
+            delta_color="off",
+        )
+        after_columns[1].metric(
+            "Gross exposure after", f"{new_gross:.1f}%", f"{new_weight:+.1f}%",
+            delta_color="off",
+        )
+        after_columns[2].metric(
+            f"{new_ticker or 'Stock'} upside / (downside)", f"{new_gap:+.1f}%"
+        )
+
+        label = f"{new_side} {new_ticker or 'this stock'} at {new_weight:.0f}%"
+        if not within_limit:
+            st.error(
+                f"**Does not fit.** {label} would raise gross exposure to "
+                f"{new_gross:.1f}%, above your {gross_limit}% limit."
+            )
+        elif closer_to_goal and valuation_agrees:
+            st.success(
+                f"**Good fit.** {label} moves the portfolio closer to your goal "
+                "and your fair-value estimate supports the trade."
+            )
+        elif closer_to_goal:
+            st.warning(
+                f"**Fits the portfolio, weak valuation case.** {label} moves the "
+                f"portfolio closer to your goal, but your estimate shows only "
+                f"{new_gap:+.1f}% for a {new_side.lower()} position (10% or more "
+                "in your favor is needed)."
+            )
+        elif valuation_agrees:
+            st.warning(
+                f"**Good idea, wrong side for this portfolio.** Your fair-value "
+                f"estimate supports {label}, but it moves net exposure further "
+                "from your goal. Consider a smaller size or an offsetting position."
+            )
+        else:
+            st.error(
+                f"**Poor fit.** {label} moves the portfolio away from your goal "
+                "and your fair-value estimate does not support the trade."
+            )
+
+        if new_ticker in set(positions["Ticker"]):
+            st.info(
+                f"{new_ticker} is already in the portfolio, so this would change "
+                "the size of an existing position rather than add diversification."
+            )
+
+        st.caption(
+            "These suggestions come from simple rules applied to the numbers you "
+            "entered. They are for learning, not verified investment advice."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tab 2: single-stock valuation screen
