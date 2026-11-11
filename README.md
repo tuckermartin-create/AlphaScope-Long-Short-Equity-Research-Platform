@@ -4,62 +4,56 @@
 
 ## App description
 
-AlphaScope is an educational hedge fund-style portfolio simulator and stock
-research screener built with Streamlit. Users build a hypothetical long/short
-stock portfolio, and the app calculates its long, short, net, and gross
-exposure and its simulated profit or loss. A second tab screens a single stock
-by comparing its price with the user's own fair-value estimate.
+AlphaScope is an educational hedge fund-style portfolio tracker built with
+Streamlit. Users choose stocks, a side (long or short), and a size for each
+position. The app looks up market prices automatically, refreshes them every
+minute, and shows the portfolio's value, exposure, and profit or loss. It also
+explains whether each stock's price trend supports the chosen side, suggests
+what kind of position to add next, and shows news on the holdings.
 
-All prices are entered by the user, so the app works instantly without
-downloading market data. The only part that uses the internet is the optional
-portfolio news section. It is a learning tool, not an investment
-recommendation.
+Its signals and suggestions come from simple rules and are for learning, not
+verified investment advice.
 
 **Intended users:** College students, student investment clubs, beginner
 investors, and aspiring equity research analysts.
 
 ## Current features
 
-**Portfolio builder**
-
-- Set the portfolio's starting capital.
-- Add, edit, and remove positions in a table: ticker, long or short, weight,
-  entry price, and current price.
-- See long, short, net, and gross exposure update as positions change.
-- See the simulated portfolio value and profit or loss, in total and per position.
-- Set a maximum gross exposure and get a warning when the portfolio exceeds it.
-- Read a plain-language summary of whether the portfolio is net long, net
-  short, or close to market neutral.
-- View a bar chart of exposure by position.
-- Choose a portfolio goal (market neutral, moderately net long, or net long)
-  and get rule-based suggestions for what kind of position to add next.
-- Test a specific new stock: see net and gross exposure after adding it and
-  whether it fits the goal, the exposure limit, and your fair-value estimate.
-- Turn on portfolio news to read recent Yahoo Finance headlines for the stocks
-  you hold, filtered by stock and number of headlines. Headlines load only on
-  request and are cached for 15 minutes so the app stays fast.
-- Start from a 12-position sample portfolio (8 longs, 4 shorts) with
-  placeholder prices that you can replace with your own.
-
-**Stock valuation screen**
-
-- Enter a ticker, current share price, and estimated fair value.
-- Adjust the percentage gap needed to show a research flag.
-- See the estimated upside or downside and a potential long, short, or neutral
-  research classification with an explanation.
+- **Automatic market prices.** Prices and price history come from Yahoo
+  Finance, are cached for one minute, and refresh on their own. Entry prices
+  are looked up from the date the positions were opened, so no prices need to
+  be typed in.
+- **Sidebar settings.** Portfolio capital, how long ago positions were opened,
+  maximum gross exposure, and a portfolio goal.
+- **Editable positions.** Add, remove, or resize stocks in a table. The app
+  starts with a 12-position sample portfolio (8 longs, 4 shorts).
+- **Overview tab.** Portfolio value over time, profit or loss by position, and
+  exposure by position as charts, with headline numbers always visible.
+- **Holdings tab.** Entry price, live price, today's change, return, and profit
+  or loss for every position.
+- **Long/short reasoning tab.** A trend signal for each stock based on three
+  rules (price against its 200-day average, 50-day against 200-day average,
+  and six-month change), whether it supports or conflicts with the chosen
+  side, and a price chart with both averages.
+- **Ideas tab.** Rule-based suggestions for what to add next, and a tester
+  that shows how a new stock would change exposure and whether it fits the
+  goal, the exposure limit, its price trend, and the user's fair-value estimate.
+- **News tab.** Recent Yahoo Finance headlines for selected holdings.
+- **Valuation screen tab.** Compare any stock's live price with the user's
+  fair-value estimate to get a long, short, or neutral research flag.
 
 ## Planned features
 
-- Optional on-demand price data for the stocks in the portfolio, with caching
-  and clear handling of slow or unavailable data sources.
-- Historical price and portfolio performance charts.
-- Financial ratio analysis and company comparisons.
+- Company fundamentals such as P/E ratio, revenue growth, and margins, used in
+  the long/short reasoning alongside the price trend.
 - Sector exposure and hedge suggestions, such as pair trades and sector ETFs.
-- Saved watchlists and portfolios.
+- Risk measures such as volatility, beta, and drawdown.
+- Saved portfolios and watchlists.
+- Exact entry dates and share counts for each position.
 
 ## Run locally
 
-1. Install Python 3.
+1. Install Python 3.9 or newer.
 2. From the project folder, install the dependencies:
 
    ```bash
@@ -72,4 +66,5 @@ investors, and aspiring equity research analysts.
    streamlit run app.py
    ```
 
-4. Open the local URL printed by Streamlit in your browser.
+4. Open the local URL printed by Streamlit in your browser. An internet
+   connection is needed for prices and news.
