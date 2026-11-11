@@ -1,0 +1,1 @@
+# AlphaScope-Long-Short-Equity-Research-Platform
