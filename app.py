@@ -1,21 +1,23 @@
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
-from email.utils import parsedate_to_datetime
-import json
-import urllib.request
-import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import altair as alt
 import pandas as pd
 import streamlit as st
 
+import analysis
+import charts
+from market_data import (
+    BENCHMARK,
+    PRICE_REFRESH_SECONDS,
+    fetch_company_info,
+    fetch_market_data,
+    fetch_news,
+)
 
-REFRESH_SECONDS = 60
-REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# How far back to measure performance, in trading days.
-PERIODS = {"1 month": 21, "3 months": 63, "6 months": 126, "1 year": 250}
+SAVE_FILE = Path(__file__).with_name("my_portfolio.csv")
+POSITION_COLUMNS = ["Ticker", "Side", "Shares", "Entry date"]
 
 GOALS = {
     "Market neutral (net near 0%)": 0,
@@ -23,217 +25,48 @@ GOALS = {
     "Net long (net near +60%)": 60,
 }
 
-LONG_COLOR = "#2a9d8f"
-SHORT_COLOR = "#e76f51"
-CHART_HEIGHT = 280
+# A sample portfolio to start from. Replace it with your own ideas.
+SAMPLE_POSITIONS = pd.DataFrame(
+    [
+        ["MSFT", "Long", 23, date(2026, 2, 2)],
+        ["AAPL", "Long", 28, date(2026, 2, 2)],
+        ["NVDA", "Long", 58, date(2026, 3, 2)],
+        ["GOOGL", "Long", 27, date(2026, 3, 2)],
+        ["AMZN", "Long", 30, date(2026, 4, 1)],
+        ["JPM", "Long", 20, date(2026, 4, 1)],
+        ["XOM", "Long", 30, date(2026, 5, 1)],
+        ["COST", "Long", 5, date(2026, 5, 1)],
+        ["TSLA", "Short", 26, date(2026, 3, 2)],
+        ["INTC", "Short", 112, date(2026, 4, 1)],
+        ["NKE", "Short", 183, date(2026, 5, 1)],
+        ["PFE", "Short", 204, date(2026, 6, 1)],
+    ],
+    columns=POSITION_COLUMNS,
+)
+
+
+def read_positions(source):
+    """Load positions from a CSV file saved by AlphaScope."""
+    positions = pd.read_csv(source)
+    positions = positions[POSITION_COLUMNS].copy()
+    positions["Entry date"] = pd.to_datetime(positions["Entry date"]).dt.date
+    positions["Shares"] = positions["Shares"].astype(float)
+    return positions
+
+
+def load_positions(positions):
+    """Show a new set of positions in the editor, clearing earlier edits."""
+    st.session_state.base_positions = positions
+    st.session_state.editor_version = st.session_state.get("editor_version", 0) + 1
+
+
+def show(value, pattern):
+    """Format a number, or show 'n/a' when the data is missing."""
+    return "n/a" if value is None or pd.isna(value) else pattern.format(value)
 
 
 # ---------------------------------------------------------------------------
-# Market data
-# ---------------------------------------------------------------------------
-def download_stock(ticker):
-    """Download the latest price and two years of daily closes for one ticker."""
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        "?range=2y&interval=1d"
-    )
-    request = urllib.request.Request(url, headers=REQUEST_HEADERS)
-    with urllib.request.urlopen(request, timeout=5) as response:
-        result = json.load(response)["chart"]["result"][0]
-
-    closes = pd.Series(
-        result["indicators"]["quote"][0]["close"],
-        index=pd.to_datetime(result["timestamp"], unit="s").normalize(),
-    ).dropna()
-
-    # Make the last point the latest market price so charts match the tables.
-    price = result["meta"]["regularMarketPrice"]
-    closes.iloc[-1] = price
-
-    return {
-        "name": result["meta"].get("longName", ticker),
-        "price": price,
-        "time": result["meta"].get("regularMarketTime"),
-        "closes": closes,
-    }
-
-
-@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
-def fetch_market_data(tickers):
-    """Return market data for each ticker that could be loaded.
-
-    Tickers are downloaded at the same time and the result is cached for one
-    minute, so the app stays fast while prices keep updating.
-    """
-
-    def safe_download(ticker):
-        try:
-            return ticker, download_stock(ticker)
-        except Exception:
-            # An unknown ticker or a slow connection should not break the app.
-            return ticker, None
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = pool.map(safe_download, tickers)
-    return {ticker: data for ticker, data in results if data is not None}
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_news(ticker):
-    """Return recent headlines for one ticker from Yahoo Finance's news feed."""
-    url = (
-        "https://feeds.finance.yahoo.com/rss/2.0/headline"
-        f"?s={ticker}&region=US&lang=en-US"
-    )
-    request = urllib.request.Request(url, headers=REQUEST_HEADERS)
-    with urllib.request.urlopen(request, timeout=5) as response:
-        feed = ET.fromstring(response.read())
-
-    articles = []
-    for item in feed.iter("item"):
-        published = item.findtext("pubDate", default="")
-        try:
-            published = parsedate_to_datetime(published).strftime("%b %d, %Y")
-        except (TypeError, ValueError):
-            pass
-        articles.append(
-            {
-                "title": item.findtext("title", default="Untitled"),
-                "link": item.findtext("link", default=""),
-                "published": published,
-            }
-        )
-    return articles
-
-
-def trend_signal(closes):
-    """Classify a stock's price trend as Long, Short, or Neutral, with reasons.
-
-    Three checks are used. All three must agree for a Long or Short signal:
-    1. Is the price above its 200-day average?
-    2. Is the 50-day average above the 200-day average?
-    3. Is the price higher than it was six months ago?
-    """
-    if len(closes) < 200:
-        return "Neutral", "Not enough price history to judge the trend."
-
-    price = closes.iloc[-1]
-    average_50 = closes.iloc[-50:].mean()
-    average_200 = closes.iloc[-200:].mean()
-    gap_to_200 = (price / average_200 - 1) * 100
-    six_month_change = (price / closes.iloc[-127] - 1) * 100
-
-    checks = [price > average_200, average_50 > average_200, six_month_change > 0]
-    reasoning = (
-        f"Price is {abs(gap_to_200):.0f}% "
-        f"{'above' if checks[0] else 'below'} its 200-day average; the 50-day "
-        f"average is {'above' if checks[1] else 'below'} the 200-day average; "
-        f"the stock is {'up' if checks[2] else 'down'} "
-        f"{abs(six_month_change):.0f}% over six months."
-    )
-
-    if all(checks):
-        return "Long", reasoning
-    if not any(checks):
-        return "Short", reasoning
-    return "Neutral", reasoning
-
-
-# ---------------------------------------------------------------------------
-# Charts
-# ---------------------------------------------------------------------------
-def value_chart(history):
-    """Line chart of portfolio value over time."""
-    data = history.rename("Value").rename_axis("Date").reset_index()
-    return (
-        alt.Chart(data)
-        .mark_line(color=LONG_COLOR, strokeWidth=2.5)
-        .encode(
-            x=alt.X("Date:T", title=None),
-            y=alt.Y("Value:Q", title="Portfolio value ($)", scale=alt.Scale(zero=False)),
-            tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Value:Q", format="$,.0f")],
-        )
-        .properties(height=CHART_HEIGHT)
-    )
-
-
-def profit_chart(positions):
-    """Bar chart of profit or loss for each position."""
-    return (
-        alt.Chart(positions)
-        .mark_bar()
-        .encode(
-            x=alt.X("Profit / loss ($):Q", title="Profit / loss ($)"),
-            y=alt.Y("Ticker:N", sort="-x", title=None, axis=alt.Axis(labelOverlap=False)),
-            color=alt.condition(
-                alt.datum["Profit / loss ($)"] >= 0,
-                alt.value(LONG_COLOR),
-                alt.value(SHORT_COLOR),
-            ),
-            tooltip=[
-                "Ticker", "Side",
-                alt.Tooltip("Return (%):Q", format="+.1f"),
-                alt.Tooltip("Profit / loss ($):Q", format="$,.0f"),
-            ],
-        )
-        .properties(height=CHART_HEIGHT)
-    )
-
-
-def exposure_chart(positions):
-    """Bar chart of position weights: longs above zero, shorts below."""
-    return (
-        alt.Chart(positions)
-        .mark_bar()
-        .encode(
-            x=alt.X("Ticker:N", sort="-y", title=None),
-            y=alt.Y("Signed weight (%):Q", title="Weight (% of capital)"),
-            color=alt.Color(
-                "Side:N",
-                scale=alt.Scale(domain=["Long", "Short"], range=[LONG_COLOR, SHORT_COLOR]),
-                legend=alt.Legend(orient="top", title=None),
-            ),
-            tooltip=["Ticker", "Side", alt.Tooltip("Weight (%):Q", format=".1f")],
-        )
-        .properties(height=CHART_HEIGHT)
-    )
-
-
-def trend_chart(closes):
-    """Line chart of the past year's price with 50-day and 200-day averages."""
-    data = pd.DataFrame(
-        {
-            "Price": closes,
-            "50-day average": closes.rolling(50).mean(),
-            "200-day average": closes.rolling(200).mean(),
-        }
-    ).iloc[-250:].rename_axis("Date").reset_index()
-    data = data.melt("Date", var_name="Line", value_name="Value").dropna()
-    return (
-        alt.Chart(data)
-        .mark_line()
-        .encode(
-            x=alt.X("Date:T", title=None),
-            y=alt.Y("Value:Q", title="Price ($)", scale=alt.Scale(zero=False)),
-            color=alt.Color(
-                "Line:N",
-                scale=alt.Scale(
-                    domain=["Price", "50-day average", "200-day average"],
-                    range=["#264653", LONG_COLOR, SHORT_COLOR],
-                ),
-                legend=alt.Legend(orient="top", title=None),
-            ),
-            strokeDash=alt.condition(
-                alt.datum.Line == "Price", alt.value([1, 0]), alt.value([5, 3])
-            ),
-            tooltip=["Line", alt.Tooltip("Date:T"), alt.Tooltip("Value:Q", format="$,.2f")],
-        )
-        .properties(height=CHART_HEIGHT)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Page setup and sidebar
+# Page setup, settings, and positions
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="AlphaScope", page_icon="📊", layout="wide")
 
@@ -244,6 +77,13 @@ st.caption(
     "from simple rules and are not verified investment advice."
 )
 
+# On first load, use the saved portfolio if there is one, otherwise the sample.
+if "base_positions" not in st.session_state:
+    try:
+        load_positions(read_positions(SAVE_FILE))
+    except Exception:
+        load_positions(SAMPLE_POSITIONS)
+
 with st.sidebar:
     st.header("Portfolio settings")
     capital = st.number_input(
@@ -253,16 +93,6 @@ with st.sidebar:
         step=1_000.0,
         format="%.2f",
         help="The total amount of money the simulated fund manages.",
-    )
-    period = st.selectbox(
-        "Positions were opened",
-        list(PERIODS.keys()),
-        index=1,
-        format_func=lambda label: f"{label} ago",
-        help=(
-            "AlphaScope looks up each stock's price from this long ago and uses "
-            "it as the entry price, so you do not need to type prices."
-        ),
     )
     gross_limit = st.slider(
         "Maximum gross exposure (%)",
@@ -281,31 +111,17 @@ with st.sidebar:
         index=1,
         help="Used on the Ideas tab to suggest what kind of position to add next.",
     )
-    st.caption(f"Prices refresh automatically every {REFRESH_SECONDS} seconds.")
-
-# A sample portfolio to start from. Replace it with your own ideas.
-starting_positions = pd.DataFrame(
-    {
-        "Ticker": [
-            "MSFT", "AAPL", "NVDA", "GOOGL", "AMZN", "JPM", "XOM", "COST",
-            "TSLA", "INTC", "NKE", "PFE",
-        ],
-        "Side": [
-            "Long", "Long", "Long", "Long", "Long", "Long", "Long", "Long",
-            "Short", "Short", "Short", "Short",
-        ],
-        "Weight (%)": [12.0, 10.0, 10.0, 8.0, 8.0, 7.0, 5.0, 5.0, 10.0, 7.0, 7.0, 6.0],
-    }
-)
 
 with st.expander("✏️ Edit positions (add, remove, or resize stocks)"):
     st.write(
-        "Choose the stocks, the side, and the size. Prices are looked up "
-        "automatically. Use the **+** row at the bottom to add a stock, or "
-        "select a row and press Delete to remove one."
+        "Enter each stock, the side, the number of shares, and the date you "
+        "opened the position. Prices are looked up automatically. Use the "
+        "**+** row at the bottom to add a stock, or select a row and press "
+        "Delete to remove one."
     )
     edited_positions = st.data_editor(
-        starting_positions,
+        st.session_state.base_positions,
+        key=f"positions_editor_{st.session_state.editor_version}",
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
@@ -314,9 +130,15 @@ with st.expander("✏️ Edit positions (add, remove, or resize stocks)"):
             "Side": st.column_config.SelectboxColumn(
                 options=["Long", "Short"], required=True, default="Long"
             ),
-            "Weight (%)": st.column_config.NumberColumn(
-                min_value=0.0, max_value=300.0, step=1.0, required=True, default=5.0,
-                help="Position size as a percentage of portfolio capital.",
+            "Shares": st.column_config.NumberColumn(
+                min_value=0.0, step=1.0, required=True, default=10.0
+            ),
+            "Entry date": st.column_config.DateColumn(
+                min_value=date.today() - timedelta(days=5 * 365),
+                max_value=date.today(),
+                required=True,
+                default=date.today(),
+                help="The entry price is the closing price on this date.",
             ),
         },
     )
@@ -324,17 +146,55 @@ with st.expander("✏️ Edit positions (add, remove, or resize stocks)"):
 # Ignore rows that are still being filled in.
 edited_positions = edited_positions.dropna().copy()
 edited_positions["Ticker"] = edited_positions["Ticker"].str.strip().str.upper()
-edited_positions = edited_positions[edited_positions["Ticker"] != ""]
+edited_positions["Entry date"] = pd.to_datetime(edited_positions["Entry date"]).dt.date
+edited_positions = edited_positions[
+    (edited_positions["Ticker"] != "") & (edited_positions["Shares"] > 0)
+]
+
+with st.sidebar:
+    st.header("Save and load")
+    save_column, reset_column = st.columns(2)
+    if save_column.button("Save", use_container_width=True, help="Keep these positions for next time."):
+        edited_positions.to_csv(SAVE_FILE, index=False)
+        load_positions(edited_positions.reset_index(drop=True))
+        st.toast("Portfolio saved. It will load automatically next time.")
+    if reset_column.button("Reset", use_container_width=True, help="Go back to the sample portfolio."):
+        SAVE_FILE.unlink(missing_ok=True)
+        load_positions(SAMPLE_POSITIONS)
+        st.rerun()
+
+    st.download_button(
+        "Download as CSV",
+        edited_positions.to_csv(index=False),
+        file_name="alphascope_portfolio.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    uploaded_file = st.file_uploader("Load a portfolio CSV", type="csv")
+    if uploaded_file is not None and st.session_state.get("last_upload") != uploaded_file.file_id:
+        st.session_state.last_upload = uploaded_file.file_id
+        try:
+            load_positions(read_positions(uploaded_file))
+            st.rerun()
+        except Exception:
+            st.error(
+                "That file could not be read. It needs the columns Ticker, "
+                "Side, Shares, and Entry date."
+            )
+
+    st.caption(f"Prices refresh automatically every {PRICE_REFRESH_SECONDS} seconds.")
 
 
 # ---------------------------------------------------------------------------
 # Main dashboard. It reruns itself every minute to pick up new prices.
 # ---------------------------------------------------------------------------
-@st.fragment(run_every=REFRESH_SECONDS)
-def dashboard(positions, capital, gross_limit, period, target_net):
-    market = fetch_market_data(tuple(sorted(set(positions["Ticker"]))))
+@st.fragment(run_every=PRICE_REFRESH_SECONDS)
+def dashboard(positions, capital, gross_limit, target_net):
+    tickers = sorted(set(positions["Ticker"]))
+    market = fetch_market_data(tuple(sorted(set(tickers) | {BENCHMARK})))
+    benchmark = market.get(BENCHMARK)
 
-    missing = sorted(set(positions["Ticker"]) - set(market))
+    missing = sorted(set(tickers) - set(market))
     if missing:
         st.warning(
             f"No market data found for {', '.join(missing)}. Check the ticker "
@@ -344,44 +204,40 @@ def dashboard(positions, capital, gross_limit, period, target_net):
     if positions.empty:
         st.info("Add at least one valid position to see the dashboard.")
         return
+    tickers = sorted(set(positions["Ticker"]))
+    company = fetch_company_info(tuple(tickers))
 
-    days = PERIODS[period]
-
-    # The entry price is the closing price at the start of the chosen period.
-    def entry_price(ticker):
+    # --- Prices, profit and loss -------------------------------------------
+    def entry_price(ticker, entry_date):
+        """The closing price on the entry date (or the next trading day)."""
         closes = market[ticker]["closes"]
-        return closes.iloc[max(len(closes) - 1 - days, 0)]
+        on_or_after = closes[closes.index >= pd.Timestamp(entry_date)]
+        return on_or_after.iloc[0] if len(on_or_after) else closes.iloc[-1]
 
     # A long gains when the price rises; a short gains when it falls.
     direction = positions["Side"].map({"Long": 1, "Short": -1})
     positions["Company"] = positions["Ticker"].map(lambda t: market[t]["name"])
+    positions["Sector"] = positions["Ticker"].map(
+        lambda t: company.get(t, {}).get("sector", "Unknown")
+    )
     positions["Live price ($)"] = positions["Ticker"].map(lambda t: market[t]["price"])
-    positions["Entry price ($)"] = positions["Ticker"].map(entry_price)
+    positions["Entry price ($)"] = [
+        entry_price(ticker, entry_date)
+        for ticker, entry_date in zip(positions["Ticker"], positions["Entry date"])
+    ]
     positions["Today (%)"] = positions["Ticker"].map(
         lambda t: (market[t]["price"] / market[t]["closes"].iloc[-2] - 1) * 100
     )
-    positions["Position size ($)"] = capital * positions["Weight (%)"] / 100
+    positions["Value ($)"] = positions["Shares"] * positions["Live price ($)"]
+    positions["Weight (%)"] = positions["Value ($)"] / capital * 100
+    positions["Signed weight (%)"] = direction * positions["Weight (%)"]
     positions["Return (%)"] = (
         direction * (positions["Live price ($)"] / positions["Entry price ($)"] - 1) * 100
     )
     positions["Profit / loss ($)"] = (
-        positions["Position size ($)"] * positions["Return (%)"] / 100
+        direction * positions["Shares"]
+        * (positions["Live price ($)"] - positions["Entry price ($)"])
     )
-    positions["Signed weight (%)"] = direction * positions["Weight (%)"]
-
-    signals = positions["Ticker"].map(lambda t: trend_signal(market[t]["closes"]))
-    positions["Trend signal"] = signals.str[0]
-    positions["Reasoning"] = signals.str[1]
-
-    def verdict(row):
-        if row["Trend signal"] == "Neutral":
-            return "🟡 Mixed evidence"
-        if row["Trend signal"] == row["Side"]:
-            return "🟢 Supports your side"
-        return "🔴 Conflicts with your side"
-
-    positions["Verdict"] = positions.apply(verdict, axis=1)
-    conflicts = positions[positions["Verdict"].str.startswith("🔴")]
 
     long_exposure = positions.loc[positions["Side"] == "Long", "Weight (%)"].sum()
     short_exposure = positions.loc[positions["Side"] == "Short", "Weight (%)"].sum()
@@ -390,24 +246,99 @@ def dashboard(positions, capital, gross_limit, period, target_net):
     total_pnl = positions["Profit / loss ($)"].sum()
     portfolio_return = total_pnl / capital * 100
 
-    # Headline numbers stay visible above every tab.
-    headline = st.columns(5)
+    # --- Portfolio value over time, against the S&P 500 ----------------------
+    first_entry = pd.Timestamp(min(positions["Entry date"]))
+    all_days = (benchmark or market[tickers[0]])["closes"].index
+    days = all_days[all_days >= first_entry]
+    if len(days) < 2:
+        days = all_days[-2:]
+
+    profit_by_day = pd.Series(0.0, index=days)
+    for ticker, side, shares, entry_date, entry in zip(
+        positions["Ticker"], positions["Side"], positions["Shares"],
+        positions["Entry date"], positions["Entry price ($)"],
+    ):
+        prices = market[ticker]["closes"].reindex(days).ffill()
+        sign = 1 if side == "Long" else -1
+        held = days >= pd.Timestamp(entry_date)
+        profit_by_day += (sign * shares * (prices - entry)).where(held, 0).fillna(0)
+
+    history = pd.DataFrame({"Portfolio": capital + profit_by_day})
+    versus_market = None
+    if benchmark:
+        market_prices = benchmark["closes"].reindex(days).ffill()
+        history["S&P 500"] = capital * market_prices / market_prices.iloc[0]
+        market_return = (market_prices.iloc[-1] / market_prices.iloc[0] - 1) * 100
+        versus_market = portfolio_return - market_return
+
+    # --- Signals --------------------------------------------------------------
+    trend = positions["Ticker"].map(lambda t: analysis.trend_signal(market[t]["closes"]))
+    fundamentals = positions["Ticker"].map(
+        lambda t: analysis.fundamental_signal(company.get(t, {}))
+    )
+    positions["Trend"] = trend.str[0]
+    positions["Trend reasoning"] = trend.str[1]
+    positions["Fundamentals"] = fundamentals.str[0]
+    positions["Fundamental reasoning"] = fundamentals.str[1]
+    positions["Verdict"] = [
+        analysis.combined_verdict(side, trend_view, fundamental_view)
+        for side, trend_view, fundamental_view in zip(
+            positions["Side"], positions["Trend"], positions["Fundamentals"]
+        )
+    ]
+    conflicts = positions[positions["Verdict"].str.startswith("🔴")]
+
+    # --- Risk -------------------------------------------------------------------
+    returns = pd.DataFrame(
+        {t: analysis.daily_returns(market[t]["closes"]) for t in tickers}
+    )
+    market_returns = analysis.daily_returns(benchmark["closes"]) if benchmark else None
+    betas = {
+        t: analysis.beta(returns[t], market_returns) if benchmark else None
+        for t in tickers
+    }
+    positions["Beta"] = positions["Ticker"].map(betas)
+    positions["Volatility (%)"] = positions["Ticker"].map(
+        lambda t: analysis.annual_volatility(returns[t])
+    )
+    portfolio_beta = (positions["Signed weight (%)"] / 100 * positions["Beta"]).sum()
+    portfolio_daily = sum(
+        weight / 100 * returns[ticker].fillna(0)
+        for ticker, weight in zip(positions["Ticker"], positions["Signed weight (%)"])
+    )
+    portfolio_volatility = analysis.annual_volatility(portfolio_daily)
+    drawdowns = analysis.drawdown(history["Portfolio"])
+
+    sector_net = positions.groupby("Sector")["Signed weight (%)"].sum()
+    biggest_sector = sector_net.abs().idxmax()
+    biggest_sector_net = sector_net[biggest_sector]
+
+    # --- Headline numbers stay visible above every tab ------------------------
+    headline = st.columns(6)
     headline[0].metric(
         "Portfolio value", f"${capital + total_pnl:,.0f}", f"{portfolio_return:+.2f}%"
     )
-    headline[1].metric(f"Profit / loss ({period})", f"${total_pnl:+,.0f}")
+    headline[1].metric("Profit / loss", f"${total_pnl:+,.0f}")
     headline[2].metric(
-        "Net exposure", f"{net_exposure:+.0f}%", help="Long weight minus short weight."
+        "vs S&P 500",
+        show(versus_market, "{:+.1f} pts"),
+        help=(
+            "Your return minus the return from putting the same capital in the "
+            "S&P 500 since your first position. Positive means you beat the market."
+        ),
     )
     headline[3].metric(
-        f"Gross exposure (limit {gross_limit}%)",
+        "Net exposure", f"{net_exposure:+.0f}%", help="Long weight minus short weight."
+    )
+    headline[4].metric(
+        f"Gross (limit {gross_limit}%)",
         f"{gross_exposure:.0f}%",
         help="Long weight plus short weight.",
     )
-    headline[4].metric(
-        "Against the trend",
-        f"{len(conflicts)} of {len(positions)}",
-        help="Positions whose side conflicts with the stock's price trend.",
+    headline[5].metric(
+        "Beta",
+        show(portfolio_beta if benchmark else None, "{:.2f}"),
+        help="How much the portfolio tends to move when the market moves 1%.",
     )
 
     latest_trade = max(data["time"] or 0 for data in market.values())
@@ -417,10 +348,12 @@ def dashboard(positions, capital, gross_limit, period, target_net):
         "When the market is closed, the closing price is shown."
     )
 
-    overview, holdings, reasoning, ideas, news, screen = st.tabs(
+    (
+        overview, holdings, reasoning, risk, pairs, ideas, news, screen
+    ) = st.tabs(
         [
-            "📈 Overview", "📋 Holdings", "🧠 Long/short reasoning",
-            "💡 Ideas", "📰 News", "🔎 Valuation screen",
+            "📈 Overview", "📋 Holdings", "🧠 Reasoning", "⚖️ Risk & sectors",
+            "🔗 Pair trades", "💡 Ideas", "📰 News", "🔎 Valuation screen",
         ]
     )
 
@@ -429,28 +362,19 @@ def dashboard(positions, capital, gross_limit, period, target_net):
         if gross_exposure > gross_limit:
             st.error(
                 f"Gross exposure is {gross_exposure:.0f}%, above your "
-                f"{gross_limit}% limit. Reduce position weights or raise the limit."
+                f"{gross_limit}% limit. Reduce position sizes or raise the limit."
             )
 
         left, middle, right = st.columns(3)
         with left:
-            st.subheader(f"Value over {period}")
-            # Add up each position's gain or loss on every day of the period.
-            gains = []
-            for ticker, side, weight in zip(
-                positions["Ticker"], positions["Side"], positions["Weight (%)"]
-            ):
-                closes = market[ticker]["closes"].iloc[-(days + 1):]
-                sign = 1 if side == "Long" else -1
-                gains.append(sign * (closes / closes.iloc[0] - 1) * weight / 100)
-            history = capital * (1 + pd.concat(gains, axis=1).ffill().fillna(0).sum(axis=1))
-            st.altair_chart(value_chart(history), use_container_width=True)
+            st.subheader("Value vs S&P 500")
+            st.altair_chart(charts.value_chart(history), use_container_width=True)
         with middle:
             st.subheader("Profit / loss by position")
-            st.altair_chart(profit_chart(positions), use_container_width=True)
+            st.altair_chart(charts.profit_chart(positions), use_container_width=True)
         with right:
             st.subheader("Exposure by position")
-            st.altair_chart(exposure_chart(positions), use_container_width=True)
+            st.altair_chart(charts.exposure_chart(positions), use_container_width=True)
 
         st.progress(
             min(gross_exposure / gross_limit, 1.0),
@@ -465,22 +389,23 @@ def dashboard(positions, capital, gross_limit, period, target_net):
         st.dataframe(
             positions[
                 [
-                    "Ticker", "Company", "Side", "Weight (%)", "Entry price ($)",
-                    "Live price ($)", "Today (%)", "Return (%)", "Profit / loss ($)",
+                    "Ticker", "Company", "Side", "Shares", "Entry date",
+                    "Entry price ($)", "Live price ($)", "Today (%)", "Value ($)",
+                    "Weight (%)", "Return (%)", "Profit / loss ($)",
                 ]
             ],
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Weight (%)": st.column_config.ProgressColumn(
-                    format="%.0f%%", min_value=0, max_value=float(positions["Weight (%)"].max())
-                ),
-                "Entry price ($)": st.column_config.NumberColumn(
-                    format="$%.2f", help=f"Closing price {period} ago."
-                ),
+                "Shares": st.column_config.NumberColumn(format="%.0f"),
+                "Entry price ($)": st.column_config.NumberColumn(format="$%.2f"),
                 "Live price ($)": st.column_config.NumberColumn(format="$%.2f"),
                 "Today (%)": st.column_config.NumberColumn(
                     format="%+.2f%%", help="The stock's price change since the previous close."
+                ),
+                "Value ($)": st.column_config.NumberColumn(format="$%.0f"),
+                "Weight (%)": st.column_config.ProgressColumn(
+                    format="%.0f%%", min_value=0, max_value=float(positions["Weight (%)"].max())
                 ),
                 "Return (%)": st.column_config.NumberColumn(
                     format="%+.2f%%",
@@ -492,47 +417,229 @@ def dashboard(positions, capital, gross_limit, period, target_net):
 
     # -----------------------------------------------------------------------
     with reasoning:
-        st.write(
-            "AlphaScope checks each stock's price trend with three rules: is the "
-            "price above its 200-day average, is the 50-day average above the "
-            "200-day average, and is the stock up over six months. All three "
-            "positive gives a **Long** signal, all three negative gives "
-            "**Short**, and anything else is **Neutral**."
-        )
+        with st.expander("How the signals work"):
+            st.markdown(
+                "**Trend** looks at price: is it above its 200-day average, is "
+                "the 50-day average above the 200-day average, and is the stock "
+                "up over six months. All three positive is Long, all three "
+                "negative is Short.\n\n"
+                "**Fundamentals** looks at the business: revenue growth (above "
+                "10% is good, shrinking is bad), profit margin (above 15% is "
+                "good, below 5% is bad), and the PEG ratio, which is the "
+                "price-to-earnings ratio divided by expected growth (below 1.5 "
+                "is cheap, above 3 is expensive). Two or more good marks is "
+                "Long, two or more bad marks is Short.\n\n"
+                "The **verdict** compares both signals with the side you chose. "
+                "These rules are simplified and are not investment advice."
+            )
 
-        table_column, chart_column = st.columns([3, 2])
+        table_column, detail_column = st.columns([3, 2])
         with table_column:
+            fundamentals_table = positions[["Ticker", "Side", "Trend", "Fundamentals", "Verdict"]].copy()
+            fundamentals_table["P/E"] = positions["Ticker"].map(lambda t: company.get(t, {}).get("pe"))
+            fundamentals_table["PEG"] = positions["Ticker"].map(lambda t: company.get(t, {}).get("peg"))
+            fundamentals_table["Revenue growth"] = positions["Ticker"].map(
+                lambda t: company.get(t, {}).get("revenue_growth")
+            )
             st.dataframe(
-                positions[["Ticker", "Side", "Trend signal", "Verdict", "Reasoning"]],
+                fundamentals_table,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "Side": st.column_config.TextColumn("Your side"),
-                    "Reasoning": st.column_config.TextColumn(width="large"),
+                    "P/E": st.column_config.NumberColumn(format="%.1f", help="Price-to-earnings ratio."),
+                    "PEG": st.column_config.NumberColumn(format="%.1f", help="P/E divided by expected growth."),
+                    "Revenue growth": st.column_config.NumberColumn(format="%+.0f%%"),
                 },
             )
-        with chart_column:
-            chart_ticker = st.selectbox(
-                "Show the trend for", list(dict.fromkeys(positions["Ticker"]))
+            if conflicts.empty:
+                st.success("No position conflicts with its signals.")
+            else:
+                st.warning(
+                    f"{', '.join(conflicts['Ticker'])} "
+                    f"{'conflicts' if len(conflicts) == 1 else 'conflict'} with "
+                    "the signals. Select one on the right to see why."
+                )
+
+        with detail_column:
+            chosen = st.selectbox("Explain a position", list(dict.fromkeys(positions["Ticker"])))
+            row = positions[positions["Ticker"] == chosen].iloc[0]
+            details = company.get(chosen, {})
+            st.markdown(f"**{row['Company']}** · {row['Sector']} · your side: {row['Side']}")
+            st.markdown(f"{row['Verdict']}")
+            st.markdown(f"**Trend: {row['Trend']}.** {row['Trend reasoning']}")
+            st.markdown(f"**Fundamentals: {row['Fundamentals']}.** {row['Fundamental reasoning']}")
+            st.caption(
+                f"P/E {show(details.get('pe'), '{:.1f}')} · "
+                f"forward P/E {show(details.get('forward_pe'), '{:.1f}')} · "
+                f"PEG {show(details.get('peg'), '{:.1f}')} · "
+                f"net margin {show(details.get('net_margin'), '{:.0f}%')}"
             )
             st.altair_chart(
-                trend_chart(market[chart_ticker]["closes"]), use_container_width=True
+                charts.trend_chart(market[chosen]["closes"]), use_container_width=True
             )
 
-        if conflicts.empty:
-            st.success("No position goes against its price trend.")
-        else:
-            st.warning(
-                f"{', '.join(conflicts['Ticker'])} "
-                f"{'goes' if len(conflicts) == 1 else 'go'} against the price "
-                "trend. That can be a deliberate bet on a reversal, but it needs "
-                "a reason beyond the trend, such as valuation or company news."
-            )
-        st.caption(
-            "The trend signal looks only at past prices. It does not consider "
-            "earnings, valuation, or news, and past trends do not guarantee "
-            "future results."
+    # -----------------------------------------------------------------------
+    with risk:
+        risk_metrics = st.columns(4)
+        risk_metrics[0].metric(
+            "Portfolio beta",
+            show(portfolio_beta if benchmark else None, "{:.2f}"),
+            help=(
+                "A beta of 0.5 means the portfolio tends to move 0.5% when the "
+                "market moves 1%. A market-neutral fund aims for a beta near 0."
+            ),
         )
+        risk_metrics[1].metric(
+            "Volatility (yearly)",
+            f"{portfolio_volatility:.1f}%",
+            help="The typical yearly swing in portfolio value, based on the past year.",
+        )
+        risk_metrics[2].metric(
+            "Maximum drawdown",
+            f"{drawdowns.min():.1f}%",
+            help="The largest fall from a peak in portfolio value since your first position.",
+        )
+        risk_metrics[3].metric(
+            "Largest sector bet",
+            f"{biggest_sector_net:+.0f}%",
+            biggest_sector,
+            delta_color="off",
+            help="The sector with the largest net exposure.",
+        )
+
+        if benchmark and abs(portfolio_beta - net_exposure / 100) > 0.15:
+            st.info(
+                f"Net exposure is {net_exposure:+.0f}%, but beta is "
+                f"{portfolio_beta:.2f}. Your positions move "
+                f"{'more' if abs(portfolio_beta) > abs(net_exposure / 100) else 'less'} "
+                "with the market than their dollar weights suggest."
+            )
+        if abs(biggest_sector_net) > 25:
+            hedge = analysis.SECTOR_ETFS.get(biggest_sector)
+            hedge_side = "short" if biggest_sector_net > 0 else "long"
+            st.warning(
+                f"**Sector concentration.** {biggest_sector} is "
+                f"{biggest_sector_net:+.0f}% net, so the portfolio is largely a "
+                f"bet on that sector."
+                + (
+                    f" A {hedge_side} position in its sector fund ({hedge}), or in "
+                    f"a weaker {biggest_sector} stock, would hedge it."
+                    if hedge else ""
+                )
+            )
+
+        sector_column, drawdown_column, table_column = st.columns(3)
+        with sector_column:
+            st.subheader("Exposure by sector")
+            st.altair_chart(charts.sector_chart(positions), use_container_width=True)
+        with drawdown_column:
+            st.subheader("Drawdown")
+            st.altair_chart(charts.drawdown_chart(drawdowns), use_container_width=True)
+        with table_column:
+            st.subheader("Risk by position")
+            st.dataframe(
+                positions[["Ticker", "Side", "Beta", "Volatility (%)"]],
+                use_container_width=True,
+                hide_index=True,
+                height=charts.CHART_HEIGHT,
+                column_config={
+                    "Beta": st.column_config.NumberColumn(format="%.2f"),
+                    "Volatility (%)": st.column_config.NumberColumn(format="%.0f%%"),
+                },
+            )
+
+    # -----------------------------------------------------------------------
+    with pairs:
+        longs = list(dict.fromkeys(positions.loc[positions["Side"] == "Long", "Ticker"]))
+        shorts = list(dict.fromkeys(positions.loc[positions["Side"] == "Short", "Ticker"]))
+
+        if not longs or not shorts:
+            st.info("A pair trade needs at least one long and one short position.")
+        else:
+            st.write(
+                "A pair trade matches a long with a short in a similar business, "
+                "so the result depends on which company does better rather than "
+                "on the direction of the market."
+            )
+            sector_of = dict(zip(positions["Ticker"], positions["Sector"]))
+            same_sector = [
+                (long_ticker, short_ticker)
+                for long_ticker in longs
+                for short_ticker in shorts
+                if sector_of[long_ticker] == sector_of[short_ticker]
+                and sector_of[long_ticker] != "Unknown"
+            ]
+            default_long, default_short = same_sector[0] if same_sector else (longs[0], shorts[0])
+
+            pick_column, chart_column = st.columns([2, 3])
+            with pick_column:
+                if same_sector:
+                    st.caption(
+                        "Same-sector pairs in your portfolio: "
+                        + ", ".join(f"{a} / {b}" for a, b in same_sector)
+                    )
+                long_ticker = st.selectbox("Long side", longs, index=longs.index(default_long))
+                short_ticker = st.selectbox("Short side", shorts, index=shorts.index(default_short))
+
+                long_rows = positions[positions["Ticker"] == long_ticker]
+                short_rows = positions[positions["Ticker"] == short_ticker]
+                long_value = long_rows["Value ($)"].sum()
+                short_value = short_rows["Value ($)"].sum()
+                pair_pnl = long_rows["Profit / loss ($)"].sum() + short_rows["Profit / loss ($)"].sum()
+                correlation = returns[long_ticker].corr(returns[short_ticker])
+
+                pair_metrics = st.columns(2)
+                pair_metrics[0].metric("Pair profit / loss", f"${pair_pnl:+,.0f}")
+                pair_metrics[1].metric(
+                    "Correlation",
+                    f"{correlation:.2f}",
+                    help=(
+                        "How closely the two stocks move together day to day, "
+                        "from -1 to 1. Higher means a better hedge."
+                    ),
+                )
+
+                checks = []
+                if sector_of[long_ticker] == sector_of[short_ticker]:
+                    checks.append(f"🟢 Same sector ({sector_of[long_ticker]}).")
+                else:
+                    checks.append(
+                        f"🟡 Different sectors ({sector_of[long_ticker]} and "
+                        f"{sector_of[short_ticker]}), so sector moves are not hedged."
+                    )
+                if correlation >= 0.5:
+                    checks.append("🟢 The stocks move together closely, so the short hedges the long.")
+                elif correlation >= 0.25:
+                    checks.append("🟡 The stocks move together only loosely.")
+                else:
+                    checks.append("🔴 The stocks barely move together, so this is two separate bets.")
+                smaller, larger = sorted([long_value, short_value])
+                if larger and smaller / larger >= 0.75:
+                    checks.append(
+                        f"🟢 Sizes are balanced (${long_value:,.0f} long, ${short_value:,.0f} short)."
+                    )
+                else:
+                    checks.append(
+                        f"🟡 Sizes are unbalanced (${long_value:,.0f} long, "
+                        f"${short_value:,.0f} short), so the pair is not market neutral."
+                    )
+                for check in checks:
+                    st.markdown(f"- {check}")
+
+            with chart_column:
+                st.subheader(f"{long_ticker} vs {short_ticker} over the past year")
+                st.altair_chart(
+                    charts.pair_chart(
+                        market[long_ticker]["closes"], market[short_ticker]["closes"],
+                        long_ticker, short_ticker,
+                    ),
+                    use_container_width=True,
+                )
+                st.caption(
+                    "The pair makes money when the long line rises faster than, "
+                    "or falls slower than, the short line."
+                )
 
     # -----------------------------------------------------------------------
     with ideas:
@@ -594,7 +701,7 @@ def dashboard(positions, capital, gross_limit, period, target_net):
                     "nothing offsets a broad market rally."
                 )
 
-            # 4. Concentration in a single position.
+            # 4. Concentration in one position or one sector.
             largest = positions.loc[positions["Weight (%)"].idxmax()]
             if gross_exposure > 0 and largest["Weight (%)"] / gross_exposure > 0.4:
                 suggestions.append(
@@ -602,20 +709,27 @@ def dashboard(positions, capital, gross_limit, period, target_net):
                     f"{largest['Weight (%)']:.0f}% of capital, more than 40% of "
                     "total exposure. Prefer a new ticker over adding to it."
                 )
+            if abs(biggest_sector_net) > 25:
+                suggestions.append(
+                    f"**Hedge your sector bet.** {biggest_sector} is "
+                    f"{biggest_sector_net:+.0f}% net. Look for a "
+                    f"{'short' if biggest_sector_net > 0 else 'long'} in that "
+                    "sector (see the Risk & sectors tab)."
+                )
 
-            # 5. Positions that are losing money or fighting the trend.
+            # 5. Positions that are losing money or conflict with the signals.
             losers = positions[positions["Return (%)"] <= -10]
             if not losers.empty:
                 suggestions.append(
                     f"**Review losing positions.** {', '.join(losers['Ticker'])} "
-                    f"lost 10% or more over {period}. Check whether the original "
-                    "reason for the position still holds."
+                    "lost 10% or more. Check whether the original reason for "
+                    "the position still holds."
                 )
             if not conflicts.empty:
                 suggestions.append(
-                    f"**Review positions against the trend.** "
+                    f"**Review positions against the signals.** "
                     f"{', '.join(conflicts['Ticker'])} conflict with their trend "
-                    "signal (see the Long/short reasoning tab)."
+                    "or fundamentals (see the Reasoning tab)."
                 )
 
             for suggestion in suggestions:
@@ -628,13 +742,14 @@ def dashboard(positions, capital, gross_limit, period, target_net):
             new_ticker = idea_columns[0].text_input("New ticker", value="META").strip().upper()
             new_side = idea_columns[1].radio("Side", ["Long", "Short"], horizontal=True)
             new_weight = idea_columns[2].number_input(
-                "Weight (%)", min_value=1.0, max_value=100.0, value=10.0, step=1.0
+                "Size (% of capital)", min_value=1.0, max_value=100.0, value=10.0, step=1.0
             )
 
             new_stock = fetch_market_data((new_ticker,)).get(new_ticker) if new_ticker else None
             if new_stock is None:
                 st.warning("Enter a valid ticker symbol to test a new position.")
             else:
+                new_company = fetch_company_info((new_ticker,)).get(new_ticker, {})
                 new_price = new_stock["price"]
                 new_fair_value = st.number_input(
                     f"Your fair value for {new_ticker} ($) — optional",
@@ -650,19 +765,25 @@ def dashboard(positions, capital, gross_limit, period, target_net):
                 new_net = net_exposure + new_direction * new_weight
                 new_gross = gross_exposure + new_weight
                 new_gap = round((new_fair_value / new_price - 1) * 100, 10)
-                new_trend, new_reasoning = trend_signal(new_stock["closes"])
+                new_trend, new_trend_reasoning = analysis.trend_signal(new_stock["closes"])
+                new_fundamentals, new_fundamental_reasoning = analysis.fundamental_signal(new_company)
 
                 # Checks: stays under the limit, moves toward the goal, and has
-                # a reason behind the side (price trend or your own valuation).
+                # a reason behind the side (trend, fundamentals, or valuation).
                 within_limit = new_gross <= gross_limit
                 closer_to_goal = abs(target_net - new_net) < abs(target_net - net_exposure)
-                valuation_agrees = new_direction * new_gap >= 10
-                trend_agrees = new_trend == new_side
-                has_reason = valuation_agrees or trend_agrees
+                reasons = []
+                if new_trend == new_side:
+                    reasons.append("the price trend supports it")
+                if new_fundamentals == new_side:
+                    reasons.append("the fundamentals support it")
+                if new_direction * new_gap >= 10:
+                    reasons.append(f"your fair value implies {new_gap:+.0f}%")
+                reason_text = ", and ".join(reasons)
 
                 after = st.columns(4)
                 after[0].metric("Live price", f"${new_price:,.2f}")
-                after[1].metric("Trend signal", new_trend)
+                after[1].metric("Trend / fundamentals", f"{new_trend} / {new_fundamentals}")
                 after[2].metric(
                     "Net after", f"{new_net:+.0f}%",
                     f"{new_direction * new_weight:+.0f}%", delta_color="off",
@@ -672,20 +793,13 @@ def dashboard(positions, capital, gross_limit, period, target_net):
                     delta_color="off",
                 )
 
-                reasons = []
-                if trend_agrees:
-                    reasons.append("the price trend supports it")
-                if valuation_agrees:
-                    reasons.append(f"your fair value implies {new_gap:+.0f}%")
-                reason_text = " and ".join(reasons)
-
                 label = f"{new_side} {new_ticker} at {new_weight:.0f}%"
                 if not within_limit:
                     st.error(
                         f"**Does not fit.** {label} would raise gross exposure "
                         f"to {new_gross:.0f}%, above your {gross_limit}% limit."
                     )
-                elif closer_to_goal and has_reason:
+                elif closer_to_goal and reasons:
                     st.success(
                         f"**Good fit.** {label} moves the portfolio closer to "
                         f"your goal, and {reason_text}."
@@ -694,10 +808,10 @@ def dashboard(positions, capital, gross_limit, period, target_net):
                     st.warning(
                         f"**Fits the portfolio, but no clear reason for the "
                         f"trade.** {label} moves the portfolio closer to your "
-                        f"goal, but the trend signal is {new_trend} and your fair "
-                        "value is not at least 10% in your favor."
+                        "goal, but neither the trend, the fundamentals, nor your "
+                        "fair value supports that side."
                     )
-                elif has_reason:
+                elif reasons:
                     st.warning(
                         f"**Good idea, wrong side for this portfolio.** For "
                         f"{label}, {reason_text}, but it moves net exposure "
@@ -707,11 +821,14 @@ def dashboard(positions, capital, gross_limit, period, target_net):
                 else:
                     st.error(
                         f"**Poor fit.** {label} moves the portfolio away from "
-                        f"your goal, the trend signal is {new_trend}, and your "
-                        "fair value does not support the trade."
+                        "your goal, and neither the trend, the fundamentals, nor "
+                        "your fair value supports that side."
                     )
 
-                st.caption(f"{new_ticker} trend: {new_reasoning}")
+                st.caption(
+                    f"Trend: {new_trend_reasoning} Fundamentals: {new_fundamental_reasoning} "
+                    f"Sector: {new_company.get('sector', 'Unknown')}."
+                )
                 if new_ticker in set(positions["Ticker"]):
                     st.info(
                         f"{new_ticker} is already in the portfolio, so this would "
@@ -828,8 +945,14 @@ def dashboard(positions, capital, gross_limit, period, target_net):
                         f"{abs(valuation_gap):.1f}% is below the {threshold}% cutoff."
                     )
 
-                trend, trend_reasoning = trend_signal(stock["closes"])
-                st.write(f"**Price trend signal: {trend}.** {trend_reasoning}")
+                screen_trend, screen_trend_reasoning = analysis.trend_signal(stock["closes"])
+                screen_fundamentals, screen_fundamental_reasoning = analysis.fundamental_signal(
+                    fetch_company_info((ticker,)).get(ticker, {})
+                )
+                st.markdown(f"**Trend: {screen_trend}.** {screen_trend_reasoning}")
+                st.markdown(
+                    f"**Fundamentals: {screen_fundamentals}.** {screen_fundamental_reasoning}"
+                )
 
         st.caption(
             "This is a simplified valuation screen, not a verified investment "
@@ -840,4 +963,4 @@ def dashboard(positions, capital, gross_limit, period, target_net):
 if edited_positions.empty:
     st.info("Open **Edit positions** above and add at least one stock.")
 else:
-    dashboard(edited_positions, capital, gross_limit, period, GOALS[goal])
+    dashboard(edited_positions, capital, gross_limit, GOALS[goal])
