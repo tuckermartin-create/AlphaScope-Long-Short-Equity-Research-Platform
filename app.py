@@ -7,6 +7,7 @@ import streamlit as st
 
 import analysis
 import charts
+import step_tracker
 from market_data import (
     BENCHMARK,
     PRICE_REFRESH_SECONDS,
@@ -17,6 +18,7 @@ from market_data import (
 
 
 SAVE_FILE = Path(__file__).with_name("my_portfolio.csv")
+STEPS_FILE = Path(__file__).with_name("my_steps.csv")
 POSITION_COLUMNS = ["Ticker", "Side", "Shares", "Entry date"]
 
 GOALS = {
@@ -60,6 +62,15 @@ def load_positions(positions):
     st.session_state.editor_version = st.session_state.get("editor_version", 0) + 1
 
 
+def set_steps(steps):
+    """Use a new set of daily step counts and keep them for next time."""
+    st.session_state.steps = steps
+    if steps is None:
+        STEPS_FILE.unlink(missing_ok=True)
+    else:
+        steps.rename("Steps").rename_axis("Date").to_csv(STEPS_FILE)
+
+
 def show(value, pattern):
     """Format a number, or show 'n/a' when the data is missing."""
     return "n/a" if value is None or pd.isna(value) else pattern.format(value)
@@ -83,6 +94,15 @@ if "base_positions" not in st.session_state:
         load_positions(read_positions(SAVE_FILE))
     except Exception:
         load_positions(SAMPLE_POSITIONS)
+
+# Step counts from an earlier upload are kept on this computer.
+if "steps" not in st.session_state:
+    try:
+        st.session_state.steps = pd.read_csv(
+            STEPS_FILE, index_col="Date", parse_dates=True
+        )["Steps"]
+    except Exception:
+        st.session_state.steps = None
 
 with st.sidebar:
     st.header("Portfolio settings")
@@ -182,6 +202,42 @@ with st.sidebar:
                 "Side, Shares, and Entry date."
             )
 
+    st.header("Step fund")
+    step_file = st.file_uploader(
+        "Upload a health app export",
+        type=["zip", "xml", "csv", "json"],
+        help=(
+            "Apple Health export.zip, a Fitbit or Google Fit export, or any CSV "
+            "with a date column and a steps column. See the Step fund tab for "
+            "how to export. The file stays on this computer."
+        ),
+    )
+    if step_file is not None and st.session_state.get("last_step_upload") != step_file.file_id:
+        st.session_state.last_step_upload = step_file.file_id
+        try:
+            with st.spinner("Reading your steps..."):
+                set_steps(step_tracker.read_step_file(step_file.name, step_file))
+            st.rerun()
+        except step_tracker.StepFileError as error:
+            st.error(str(error))
+
+    sample_column, remove_column = st.columns(2)
+    if sample_column.button("Sample", use_container_width=True, help="Try it with made-up steps."):
+        set_steps(step_tracker.sample_steps())
+        st.rerun()
+    if remove_column.button("Remove", use_container_width=True, help="Delete the step data."):
+        set_steps(None)
+        st.rerun()
+
+    cents_per_step = st.number_input(
+        "Cents earned per step", min_value=0.1, max_value=100.0, value=1.0, step=0.5
+    )
+    add_steps_to_capital = st.toggle(
+        "Add step earnings to capital",
+        value=True,
+        help="Money earned from steps is added to the portfolio's capital.",
+    )
+
     st.caption(f"Prices refresh automatically every {PRICE_REFRESH_SECONDS} seconds.")
 
 
@@ -189,7 +245,9 @@ with st.sidebar:
 # Main dashboard. It reruns itself every minute to pick up new prices.
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=PRICE_REFRESH_SECONDS)
-def dashboard(positions, capital, gross_limit, target_net):
+def dashboard(
+    positions, capital, gross_limit, target_net, steps, cents_per_step, add_steps_to_capital
+):
     tickers = sorted(set(positions["Ticker"]))
     market = fetch_market_data(tuple(sorted(set(tickers) | {BENCHMARK})))
     benchmark = market.get(BENCHMARK)
@@ -206,6 +264,15 @@ def dashboard(positions, capital, gross_limit, target_net):
         return
     tickers = sorted(set(positions["Ticker"]))
     company = fetch_company_info(tuple(tickers))
+    first_entry = pd.Timestamp(min(positions["Entry date"]))
+
+    # --- Step fund: steps since the first position earn money ---------------
+    step_earnings = None
+    if steps is not None:
+        counted_steps = steps[steps.index >= first_entry]
+        step_earnings = counted_steps * cents_per_step / 100
+        if add_steps_to_capital:
+            capital += step_earnings.sum()
 
     # --- Prices, profit and loss -------------------------------------------
     def entry_price(ticker, entry_date):
@@ -247,7 +314,6 @@ def dashboard(positions, capital, gross_limit, target_net):
     portfolio_return = total_pnl / capital * 100
 
     # --- Portfolio value over time, against the S&P 500 ----------------------
-    first_entry = pd.Timestamp(min(positions["Entry date"]))
     all_days = (benchmark or market[tickers[0]])["closes"].index
     days = all_days[all_days >= first_entry]
     if len(days) < 2:
@@ -349,11 +415,12 @@ def dashboard(positions, capital, gross_limit, target_net):
     )
 
     (
-        overview, holdings, reasoning, risk, pairs, ideas, news, screen
+        overview, holdings, reasoning, risk, pairs, ideas, step_fund, news, screen
     ) = st.tabs(
         [
             "📈 Overview", "📋 Holdings", "🧠 Reasoning", "⚖️ Risk & sectors",
-            "🔗 Pair trades", "💡 Ideas", "📰 News", "🔎 Valuation screen",
+            "🔗 Pair trades", "💡 Ideas", "👟 Step fund", "📰 News",
+            "🔎 Valuation screen",
         ]
     )
 
@@ -836,6 +903,114 @@ def dashboard(positions, capital, gross_limit, target_net):
                     )
 
     # -----------------------------------------------------------------------
+    with step_fund:
+        if steps is None:
+            st.write(
+                "Turn your steps into money to invest. Every step earns a set "
+                "number of cents, which is added to the portfolio's capital. "
+                "Upload a health app export in the sidebar, or press "
+                "**Sample** there to try it with made-up steps."
+            )
+            apple, fitbit, google, other = st.columns(4)
+            apple.markdown(
+                "**Apple Health**\n\nOpen the Health app, tap your picture, then "
+                "**Export All Health Data**. Upload the `export.zip` it creates."
+            )
+            fitbit.markdown(
+                "**Fitbit**\n\nGo to takeout.google.com, choose **Fitbit**, and "
+                "create the export. Upload the zip, or a `steps-...json` file "
+                "from inside it."
+            )
+            google.markdown(
+                "**Google Fit**\n\nGo to takeout.google.com, choose **Fit**, and "
+                "create the export. Upload the zip or its "
+                "`Daily activity metrics.csv`."
+            )
+            other.markdown(
+                "**Any other app**\n\nUpload a CSV file that has a date column "
+                "and a steps column, for example `Date` and `Steps`."
+            )
+            st.caption(
+                "Your health data stays on this computer. It is not uploaded "
+                "anywhere and is not included in the GitHub repository."
+            )
+        elif step_earnings.empty:
+            st.info(
+                f"Your step data ends before your first position was opened "
+                f"({first_entry:%b %d, %Y}). The Step fund counts steps from "
+                "that date, so upload a newer export or use an earlier entry date."
+            )
+        else:
+            total_earned = step_earnings.sum()
+            goal_steps = 10_000
+            days_at_goal = int((counted_steps >= goal_steps).sum())
+
+            # What the money would be worth if each day's earnings had gone
+            # into the S&P 500 on the day they were earned.
+            growth = pd.DataFrame({"Earned from steps": step_earnings.cumsum()})
+            invested_value = None
+            if benchmark:
+                market_price = (
+                    benchmark["closes"].reindex(step_earnings.index, method="ffill").bfill()
+                )
+                growth["If invested in the S&P 500"] = (
+                    market_price * (step_earnings / market_price).cumsum()
+                )
+                invested_value = growth["If invested in the S&P 500"].iloc[-1]
+
+            step_metrics = st.columns(5)
+            step_metrics[0].metric("Steps counted", f"{counted_steps.sum():,.0f}")
+            step_metrics[1].metric(
+                "Earned from steps",
+                f"${total_earned:,.0f}",
+                f"{cents_per_step:g}¢ per step",
+                delta_color="off",
+            )
+            step_metrics[2].metric(
+                "If invested in the S&P 500",
+                show(invested_value, "${:,.0f}"),
+                show(
+                    None if invested_value is None else invested_value - total_earned,
+                    "{:+,.0f} market gain",
+                ),
+                help="Each day's step money put into the S&P 500 on the day it was earned.",
+            )
+            step_metrics[3].metric("Daily average", f"{counted_steps.mean():,.0f} steps")
+            step_metrics[4].metric(
+                f"Days at {goal_steps:,}+ steps", f"{days_at_goal} of {len(counted_steps)}"
+            )
+
+            steps_column, growth_column = st.columns(2)
+            with steps_column:
+                st.subheader("Daily steps")
+                st.altair_chart(
+                    charts.steps_chart(counted_steps, goal_steps), use_container_width=True
+                )
+            with growth_column:
+                st.subheader("Step money over time")
+                st.altair_chart(
+                    charts.line_chart(
+                        growth,
+                        "Value ($)",
+                        {
+                            "Earned from steps": charts.NEUTRAL_COLOR,
+                            "If invested in the S&P 500": charts.LONG_COLOR,
+                        },
+                    ),
+                    use_container_width=True,
+                )
+
+            st.caption(
+                f"Counting steps from {first_entry:%b %d, %Y}, when your first "
+                f"position was opened, to {counted_steps.index[-1]:%b %d, %Y}. "
+                + (
+                    f"The ${total_earned:,.0f} earned is included in portfolio capital."
+                    if add_steps_to_capital
+                    else "Step earnings are not being added to portfolio capital."
+                )
+            )
+
+    # -----------------------------------------------------------------------
     with news:
         portfolio_tickers = list(dict.fromkeys(positions["Ticker"]))
         largest_holdings = list(
@@ -963,4 +1138,7 @@ def dashboard(positions, capital, gross_limit, target_net):
 if edited_positions.empty:
     st.info("Open **Edit positions** above and add at least one stock.")
 else:
-    dashboard(edited_positions, capital, gross_limit, GOALS[goal])
+    dashboard(
+        edited_positions, capital, gross_limit, GOALS[goal],
+        st.session_state.steps, cents_per_step, add_steps_to_capital,
+    )

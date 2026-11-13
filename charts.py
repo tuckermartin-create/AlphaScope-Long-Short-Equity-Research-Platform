@@ -129,3 +129,22 @@ def drawdown_chart(drawdowns):
         )
         .properties(height=CHART_HEIGHT)
     )
+
+
+def steps_chart(steps, goal):
+    """Daily steps as bars, with a 7-day average and a goal line."""
+    data = pd.DataFrame(
+        {"Steps": steps, "7-day average": steps.rolling(7, min_periods=1).mean()}
+    ).rename_axis("Date").reset_index()
+    base = alt.Chart(data).encode(x=alt.X("Date:T", title=None))
+    bars = base.mark_bar(color=NEUTRAL_COLOR, opacity=0.5).encode(
+        y=alt.Y("Steps:Q", title="Steps"),
+        tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Steps:Q", format=",.0f")],
+    )
+    average = base.mark_line(color=LONG_COLOR, strokeWidth=2.5).encode(y="7-day average:Q")
+    goal_line = (
+        alt.Chart(pd.DataFrame({"Goal": [goal]}))
+        .mark_rule(color=SHORT_COLOR, strokeDash=[5, 3])
+        .encode(y="Goal:Q")
+    )
+    return (bars + average + goal_line).properties(height=CHART_HEIGHT)

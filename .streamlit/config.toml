@@ -1,0 +1,3 @@
+[server]
+# Apple Health exports can be large. Size limit for uploads, in megabytes.
+maxUploadSize = 2000
