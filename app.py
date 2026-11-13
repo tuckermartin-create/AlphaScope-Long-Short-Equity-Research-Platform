@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,10 @@ from market_data import (
 
 SAVE_FILE = Path(__file__).with_name("my_portfolio.csv")
 STEPS_FILE = Path(__file__).with_name("my_steps.csv")
+CASH_OUT_FILE = Path(__file__).with_name("my_step_cash_outs.json")
+
+# The Step fund rate is fixed: 10,000 steps earn $1.
+CENTS_PER_STEP = 0.01
 POSITION_COLUMNS = ["Ticker", "Side", "Shares", "Entry date"]
 
 GOALS = {
@@ -65,10 +70,20 @@ def load_positions(positions):
 def set_steps(steps):
     """Use a new set of daily step counts and keep them for next time."""
     st.session_state.steps = steps
+    set_cashed_out(0.0)  # New step data starts a new Step fund.
     if steps is None:
         STEPS_FILE.unlink(missing_ok=True)
     else:
         steps.rename("Steps").rename_axis("Date").to_csv(STEPS_FILE)
+
+
+def set_cashed_out(amount):
+    """Record the total profit cashed out of the Step fund so far."""
+    st.session_state.cashed_out = amount
+    if amount:
+        CASH_OUT_FILE.write_text(json.dumps({"cashed_out": amount}))
+    else:
+        CASH_OUT_FILE.unlink(missing_ok=True)
 
 
 def show(value, pattern):
@@ -103,6 +118,10 @@ if "steps" not in st.session_state:
         )["Steps"]
     except Exception:
         st.session_state.steps = None
+    try:
+        st.session_state.cashed_out = json.loads(CASH_OUT_FILE.read_text())["cashed_out"]
+    except Exception:
+        st.session_state.cashed_out = 0.0
 
 with st.sidebar:
     st.header("Portfolio settings")
@@ -229,19 +248,10 @@ with st.sidebar:
         set_steps(None)
         st.rerun()
 
-    cents_per_step = st.number_input(
-        "Cents earned per step",
-        min_value=0.001,
-        max_value=100.0,
-        value=0.01,
-        step=0.01,
-        format="%.3f",
-        help="0.01 means 10,000 steps earn $1.",
-    )
-    add_steps_to_capital = st.toggle(
-        "Add step earnings to capital",
-        value=True,
-        help="Money earned from steps is added to the portfolio's capital.",
+    st.caption(
+        f"Every step earns {CENTS_PER_STEP:g}¢ of step credit, so 10,000 steps "
+        "earn $1. Step credit is invested in the portfolio and cannot be "
+        "cashed out; only the profit it makes can."
     )
 
     st.caption(f"Prices refresh automatically every {PRICE_REFRESH_SECONDS} seconds.")
@@ -251,9 +261,7 @@ with st.sidebar:
 # Main dashboard. It reruns itself every minute to pick up new prices.
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=PRICE_REFRESH_SECONDS)
-def dashboard(
-    positions, capital, gross_limit, target_net, steps, cents_per_step, add_steps_to_capital
-):
+def dashboard(positions, capital, gross_limit, target_net, steps):
     tickers = sorted(set(positions["Ticker"]))
     market = fetch_market_data(tuple(sorted(set(tickers) | {BENCHMARK})))
     benchmark = market.get(BENCHMARK)
@@ -272,13 +280,15 @@ def dashboard(
     company = fetch_company_info(tuple(tickers))
     first_entry = pd.Timestamp(min(positions["Entry date"]))
 
-    # --- Step fund: steps since the first position earn money ---------------
-    step_earnings = None
+    # --- Step fund: steps since the first position earn step credit ---------
+    # Step credit is added to capital and invested. Profit that has already
+    # been cashed out has left the portfolio.
+    step_credit = None
+    cashed_out = st.session_state.cashed_out
     if steps is not None:
         counted_steps = steps[steps.index >= first_entry]
-        step_earnings = counted_steps * cents_per_step / 100
-        if add_steps_to_capital:
-            capital += step_earnings.sum()
+        step_credit = counted_steps * CENTS_PER_STEP / 100
+        capital += step_credit.sum() - cashed_out
 
     # --- Prices, profit and loss -------------------------------------------
     def entry_price(ticker, entry_date):
@@ -912,8 +922,10 @@ def dashboard(
     with step_fund:
         if steps is None:
             st.write(
-                "Turn your steps into money to invest. Every step earns a set "
-                "number of cents, which is added to the portfolio's capital. "
+                "Turn your steps into money to invest. Every step earns step "
+                "credit (10,000 steps = $1), which is invested in the "
+                "portfolio. Step credit cannot be cashed out, but the profit "
+                "it makes can. "
                 "Upload a health app export in the sidebar, or press "
                 "**Sample** there to try it with made-up steps."
             )
@@ -940,51 +952,81 @@ def dashboard(
                 "Your health data stays on this computer. It is not uploaded "
                 "anywhere and is not included in the GitHub repository."
             )
-        elif step_earnings.empty:
+        elif step_credit.empty:
             st.info(
                 f"Your step data ends before your first position was opened "
                 f"({first_entry:%b %d, %Y}). The Step fund counts steps from "
                 "that date, so upload a newer export or use an earlier entry date."
             )
         else:
-            total_earned = step_earnings.sum()
+            total_credit = step_credit.sum()
             goal_steps = 10_000
-            days_at_goal = int((counted_steps >= goal_steps).sum())
 
-            # What the money would be worth if each day's earnings had gone
-            # into the S&P 500 on the day they were earned.
-            growth = pd.DataFrame({"Earned from steps": step_earnings.cumsum()})
-            invested_value = None
+            # Each day's step credit is invested in the portfolio that day, so
+            # it earns the portfolio's return from then on.
+            def invested_value(price_index):
+                price = price_index.reindex(step_credit.index, method="ffill").bfill()
+                return price * (step_credit / price).cumsum()
+
+            growth = pd.DataFrame({"Step credit (locked)": step_credit.cumsum()})
+            growth["Value in your portfolio"] = invested_value(history["Portfolio"])
             if benchmark:
-                market_price = (
-                    benchmark["closes"].reindex(step_earnings.index, method="ffill").bfill()
-                )
-                growth["If invested in the S&P 500"] = (
-                    market_price * (step_earnings / market_price).cumsum()
-                )
-                invested_value = growth["If invested in the S&P 500"].iloc[-1]
+                growth["If invested in the S&P 500"] = invested_value(benchmark["closes"])
+
+            step_profit = growth["Value in your portfolio"].iloc[-1] - total_credit
+            available = max(step_profit - cashed_out, 0.0)
 
             step_metrics = st.columns(5)
-            step_metrics[0].metric("Steps counted", f"{counted_steps.sum():,.0f}")
-            step_metrics[1].metric(
-                "Earned from steps",
-                f"${total_earned:,.0f}",
-                f"{cents_per_step:g}¢ per step",
+            step_metrics[0].metric(
+                "Steps counted",
+                f"{counted_steps.sum():,.0f}",
+                f"{counted_steps.mean():,.0f} a day",
                 delta_color="off",
             )
+            step_metrics[1].metric(
+                "🔒 Step credit",
+                f"${total_credit:,.2f}",
+                "locked",
+                delta_color="off",
+                help=f"Every step earns {CENTS_PER_STEP:g}¢. This money can only be invested.",
+            )
             step_metrics[2].metric(
-                "If invested in the S&P 500",
-                show(invested_value, "${:,.0f}"),
-                show(
-                    None if invested_value is None else invested_value - total_earned,
-                    "{:+,.0f} market gain",
+                "Profit made by step credit",
+                f"${step_profit:+,.2f}",
+                help=(
+                    "What your step credit has gained or lost by being invested "
+                    "in your portfolio from the day it was earned."
                 ),
-                help="Each day's step money put into the S&P 500 on the day it was earned.",
             )
-            step_metrics[3].metric("Daily average", f"{counted_steps.mean():,.0f} steps")
-            step_metrics[4].metric(
-                f"Days at {goal_steps:,}+ steps", f"{days_at_goal} of {len(counted_steps)}"
+            step_metrics[3].metric(
+                "Available to cash out",
+                f"${available:,.2f}",
+                help="Profit made by step credit that has not been cashed out yet.",
             )
+            step_metrics[4].metric("Cashed out so far", f"${cashed_out:,.2f}")
+
+            action_column, rule_column = st.columns([1, 3])
+            if action_column.button(
+                f"Cash out ${available:,.2f}",
+                disabled=available < 0.01,
+                use_container_width=True,
+                type="primary",
+            ):
+                set_cashed_out(cashed_out + available)
+                st.toast(f"Cashed out ${available:,.2f} of profit.")
+                st.rerun()
+            if step_profit < 0:
+                rule_column.caption(
+                    "Your step credit is currently worth less than you earned, "
+                    "so there is nothing to cash out. Step credit itself always "
+                    "stays invested."
+                )
+            else:
+                rule_column.caption(
+                    "Step credit works like bonus money: it stays invested in "
+                    "your portfolio and can never be withdrawn. Only the profit "
+                    "it makes can be cashed out."
+                )
 
             steps_column, growth_column = st.columns(2)
             with steps_column:
@@ -993,15 +1035,16 @@ def dashboard(
                     charts.steps_chart(counted_steps, goal_steps), use_container_width=True
                 )
             with growth_column:
-                st.subheader("Step money over time")
+                st.subheader("Step credit and what it has grown to")
+                colors = {
+                    "Step credit (locked)": charts.NEUTRAL_COLOR,
+                    "Value in your portfolio": charts.LONG_COLOR,
+                    "If invested in the S&P 500": charts.SHORT_COLOR,
+                }
                 st.altair_chart(
                     charts.line_chart(
-                        growth,
-                        "Value ($)",
-                        {
-                            "Earned from steps": charts.NEUTRAL_COLOR,
-                            "If invested in the S&P 500": charts.LONG_COLOR,
-                        },
+                        growth, "Value ($)", {k: v for k, v in colors.items() if k in growth},
+                        value_format="$,.2f",
                     ),
                     use_container_width=True,
                 )
@@ -1009,11 +1052,7 @@ def dashboard(
             st.caption(
                 f"Counting steps from {first_entry:%b %d, %Y}, when your first "
                 f"position was opened, to {counted_steps.index[-1]:%b %d, %Y}. "
-                + (
-                    f"The ${total_earned:,.0f} earned is included in portfolio capital."
-                    if add_steps_to_capital
-                    else "Step earnings are not being added to portfolio capital."
-                )
+                f"The ${total_credit:,.2f} of step credit is included in portfolio capital."
             )
 
     # -----------------------------------------------------------------------
@@ -1144,7 +1183,4 @@ def dashboard(
 if edited_positions.empty:
     st.info("Open **Edit positions** above and add at least one stock.")
 else:
-    dashboard(
-        edited_positions, capital, gross_limit, GOALS[goal],
-        st.session_state.steps, cents_per_step, add_steps_to_capital,
-    )
+    dashboard(edited_positions, capital, gross_limit, GOALS[goal], st.session_state.steps)

@@ -14,7 +14,7 @@ the chosen side, measures risk, analyzes pair trades, suggests what to add
 next, and shows news on the holdings.
 
 It also has a fitness twist: the Step fund turns steps from a health app into
-money for the portfolio to invest.
+credit that is invested in the portfolio, and only its profit can be cashed out.
 
 Its signals and suggestions come from simple rules and are for learning, not
 verified investment advice.
@@ -51,10 +51,12 @@ investors, and aspiring equity research analysts.
   that shows how a new stock would change exposure and whether its trend,
   fundamentals, or the user's fair-value estimate support it.
 - **Step fund tab.** Upload a health app export (Apple Health, Fitbit, Google
-  Fit, or any CSV with dates and steps). Every step earns a set number of
-  cents, which is added to the portfolio's capital. The tab shows daily steps,
-  money earned, and what it would be worth invested in the S&P 500. Step data
-  stays on the user's computer and is not part of this repository.
+  Fit, or any CSV with dates and steps). Every step earns step credit at a fixed
+  rate (10,000 steps = $1). Step credit works like bonus money: it is
+  invested in the portfolio and can never be cashed out, but the profit it
+  makes can. The tab shows daily steps, locked step credit, the profit
+  available to cash out, and how the credit has grown. Step data stays on the
+  user's computer and is not part of this repository.
 - **News tab.** Recent Yahoo Finance headlines for selected holdings.
 - **Valuation screen tab.** Compare any stock's live price with the user's
   fair-value estimate to get a long, short, or neutral research flag.
