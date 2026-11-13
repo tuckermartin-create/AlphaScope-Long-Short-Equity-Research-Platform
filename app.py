@@ -230,7 +230,13 @@ with st.sidebar:
         st.rerun()
 
     cents_per_step = st.number_input(
-        "Cents earned per step", min_value=0.1, max_value=100.0, value=1.0, step=0.5
+        "Cents earned per step",
+        min_value=0.001,
+        max_value=100.0,
+        value=0.01,
+        step=0.01,
+        format="%.3f",
+        help="0.01 means 10,000 steps earn $1.",
     )
     add_steps_to_capital = st.toggle(
         "Add step earnings to capital",
