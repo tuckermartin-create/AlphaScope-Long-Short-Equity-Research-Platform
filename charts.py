@@ -4,10 +4,26 @@ import altair as alt
 import pandas as pd
 
 
-LONG_COLOR = "#2a9d8f"
-SHORT_COLOR = "#e76f51"
-NEUTRAL_COLOR = "#8d99ae"
-CHART_HEIGHT = 280
+# Colors from the "Clear ledger" design (see ui.py).
+LONG_COLOR = "#0E8A5F"
+SHORT_COLOR = "#C8372D"
+NEUTRAL_COLOR = "#8A8F98"
+ACTION_COLOR = "#1F4FD8"
+STEP_COLOR = "#B5661A"
+CHART_HEIGHT = 300
+
+
+def styled(chart):
+    """Give a chart the app's font, quiet grid lines, and a clear background."""
+    return (
+        chart.configure(background="transparent", font="Inter")
+        .configure_view(strokeWidth=0)
+        .configure_axis(
+            gridColor="#E5E3DC", domainColor="#E5E3DC", tickColor="#E5E3DC",
+            labelColor="#5B6470", titleColor="#5B6470", labelFontSize=12, titleFontSize=12,
+        )
+        .configure_legend(labelColor="#14171A", labelFontSize=13, symbolStrokeWidth=3)
+    )
 
 SIDE_COLORS = alt.Scale(domain=["Long", "Short"], range=[LONG_COLOR, SHORT_COLOR])
 
@@ -18,7 +34,7 @@ def line_chart(data, y_title, colors, value_format="$,.0f"):
         data.rename_axis("Date").reset_index()
         .melt("Date", var_name="Line", value_name="Value").dropna()
     )
-    return (
+    return styled(
         alt.Chart(long_form)
         .mark_line(strokeWidth=2)
         .encode(
@@ -37,7 +53,7 @@ def line_chart(data, y_title, colors, value_format="$,.0f"):
 
 def value_chart(history):
     """Portfolio value against the same money invested in the S&P 500."""
-    colors = {"Portfolio": LONG_COLOR, "S&P 500": NEUTRAL_COLOR}
+    colors = {"Portfolio": ACTION_COLOR, "S&P 500": NEUTRAL_COLOR}
     return line_chart(history, "Value ($)", {k: v for k, v in colors.items() if k in history})
 
 
@@ -50,7 +66,7 @@ def trend_chart(closes):
             "200-day average": closes.rolling(200).mean(),
         }
     ).iloc[-250:]
-    colors = {"Price": "#457b9d", "50-day average": LONG_COLOR, "200-day average": SHORT_COLOR}
+    colors = {"Price": ACTION_COLOR, "50-day average": LONG_COLOR, "200-day average": SHORT_COLOR}
     return line_chart(data, "Price ($)", colors, value_format="$,.2f")
 
 
@@ -65,7 +81,7 @@ def pair_chart(long_closes, short_closes, long_ticker, short_ticker):
 
 def profit_chart(positions):
     """Profit or loss for each position."""
-    return (
+    return styled(
         alt.Chart(positions)
         .mark_bar()
         .encode(
@@ -88,7 +104,7 @@ def profit_chart(positions):
 
 def exposure_chart(positions):
     """Position weights: longs above zero, shorts below."""
-    return (
+    return styled(
         alt.Chart(positions)
         .mark_bar()
         .encode(
@@ -103,7 +119,7 @@ def exposure_chart(positions):
 
 def sector_chart(positions):
     """Long and short weight in each sector."""
-    return (
+    return styled(
         alt.Chart(positions)
         .mark_bar()
         .encode(
@@ -119,7 +135,7 @@ def sector_chart(positions):
 def drawdown_chart(drawdowns):
     """How far the portfolio has been below its highest value."""
     data = drawdowns.rename("Drawdown").rename_axis("Date").reset_index()
-    return (
+    return styled(
         alt.Chart(data)
         .mark_area(color=SHORT_COLOR, opacity=0.5, line={"color": SHORT_COLOR})
         .encode(
@@ -137,14 +153,14 @@ def steps_chart(steps, goal):
         {"Steps": steps, "7-day average": steps.rolling(7, min_periods=1).mean()}
     ).rename_axis("Date").reset_index()
     base = alt.Chart(data).encode(x=alt.X("Date:T", title=None))
-    bars = base.mark_bar(color=NEUTRAL_COLOR, opacity=0.5).encode(
+    bars = base.mark_bar(color=STEP_COLOR, opacity=0.35).encode(
         y=alt.Y("Steps:Q", title="Steps"),
         tooltip=[alt.Tooltip("Date:T"), alt.Tooltip("Steps:Q", format=",.0f")],
     )
-    average = base.mark_line(color=LONG_COLOR, strokeWidth=2.5).encode(y="7-day average:Q")
+    average = base.mark_line(color=STEP_COLOR, strokeWidth=2.5).encode(y="7-day average:Q")
     goal_line = (
         alt.Chart(pd.DataFrame({"Goal": [goal]}))
-        .mark_rule(color=SHORT_COLOR, strokeDash=[5, 3])
+        .mark_rule(color=NEUTRAL_COLOR, strokeDash=[5, 3])
         .encode(y="Goal:Q")
     )
-    return (bars + average + goal_line).properties(height=CHART_HEIGHT)
+    return styled((bars + average + goal_line).properties(height=CHART_HEIGHT))

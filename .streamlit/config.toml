@@ -1,3 +1,11 @@
 [server]
 # Apple Health exports can be large. Size limit for uploads, in megabytes.
 maxUploadSize = 2000
+
+[theme]
+# The "Clear ledger" look. Fonts and component styles are in ui.py.
+base = "light"
+primaryColor = "#1F4FD8"
+backgroundColor = "#FAFAF7"
+secondaryBackgroundColor = "#F1EFE8"
+textColor = "#14171A"

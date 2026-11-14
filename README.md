@@ -66,6 +66,24 @@ investors, and aspiring equity research analysts.
 - **Valuation screen tab.** Compare any stock's live price with the user's
   fair-value estimate to get a long, short, or neutral research flag.
 
+## Design
+
+The app follows one visual direction, called "Clear ledger":
+
+- **Hierarchy.** One headline number with a plain-language sentence, then one
+  main chart or card, with tables and secondary charts behind "Show" panels.
+- **Color and type.** A warm off-white page, white cards, ink text, one blue
+  for actions, green for gains, and red for losses. Fraunces for headings and
+  the headline number, Inter for everything else. Gains and losses are also
+  marked with arrows and words, not color alone.
+- **States.** Placeholder blocks while market data loads, empty states with a
+  next action (for example "Load sample portfolio"), and plain-language error
+  messages with a "Try again" button.
+- **Mobile and accessibility.** Columns stack on a phone, buttons and tabs are
+  at least 44px tall, every input has a label, and keyboard focus is clearly
+  outlined.
+- **Feedback.** Every button confirms what it did with a short message.
+
 ## Planned features
 
 - Record closed trades so realized profit is tracked along with open positions.
@@ -80,8 +98,10 @@ investors, and aspiring equity research analysts.
 - `market_data.py` — downloads prices, fundamentals, sectors, and news.
 - `analysis.py` — the long/short signal rules and risk calculations.
 - `charts.py` — the charts.
+- `ui.py` — fonts, styles, and reusable page pieces (headline, cards, empty
+  and loading states, confirmation messages).
 - `step_tracker.py` — reads step counts from health app exports.
-- `.streamlit/config.toml` — raises the upload size limit for large exports.
+- `.streamlit/config.toml` — the color theme and the upload size limit.
 
 ## Run locally
 

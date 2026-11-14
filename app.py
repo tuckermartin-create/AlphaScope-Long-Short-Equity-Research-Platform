@@ -9,6 +9,7 @@ import streamlit as st
 import analysis
 import charts
 import step_tracker
+import ui
 from market_data import (
     BENCHMARK,
     PRICE_REFRESH_SECONDS,
@@ -95,12 +96,13 @@ def show(value, pattern):
 # Page setup, settings, and positions
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="AlphaScope", page_icon="📊", layout="wide")
+ui.apply_styles()
+ui.show_flash()
 
-st.title("AlphaScope — Long/Short Equity Research Platform")
+st.title("AlphaScope")
 st.caption(
-    "Track a long/short stock portfolio with market prices that update "
-    "automatically. An educational simulator: its signals and suggestions come "
-    "from simple rules and are not verified investment advice."
+    "A long/short portfolio tracker with live market prices. An educational "
+    "simulator: its signals and suggestions are not investment advice."
 )
 
 # On first load, use the saved portfolio if there is one, otherwise the sample.
@@ -151,7 +153,7 @@ with st.sidebar:
         help="Used on the Ideas tab to suggest what kind of position to add next.",
     )
 
-with st.expander("✏️ Edit positions (add, remove, or resize stocks)"):
+with st.expander("Edit positions"):
     st.write(
         "Enter each stock, the side, the number of shares, and the date you "
         "opened the position. Prices are looked up automatically. Use the "
@@ -196,10 +198,11 @@ with st.sidebar:
     if save_column.button("Save", use_container_width=True, help="Keep these positions for next time."):
         edited_positions.to_csv(SAVE_FILE, index=False)
         load_positions(edited_positions.reset_index(drop=True))
-        st.toast("Portfolio saved. It will load automatically next time.")
+        st.toast("Portfolio saved. It loads automatically next time.", icon="✅")
     if reset_column.button("Reset", use_container_width=True, help="Go back to the sample portfolio."):
         SAVE_FILE.unlink(missing_ok=True)
         load_positions(SAMPLE_POSITIONS)
+        ui.flash("Back to the sample portfolio.")
         st.rerun()
 
     st.download_button(
@@ -214,11 +217,13 @@ with st.sidebar:
         st.session_state.last_upload = uploaded_file.file_id
         try:
             load_positions(read_positions(uploaded_file))
+            ui.flash("Portfolio loaded from your file.")
             st.rerun()
         except Exception:
             st.error(
-                "That file could not be read. It needs the columns Ticker, "
-                "Side, Shares, and Entry date."
+                "That file couldn't be read. It needs the columns Ticker, "
+                "Side, Shares, and Entry date. Try a file downloaded from "
+                "AlphaScope."
             )
 
     st.header("Step fund")
@@ -236,6 +241,7 @@ with st.sidebar:
         try:
             with st.spinner("Reading your steps..."):
                 set_steps(step_tracker.read_step_file(step_file.name, step_file))
+            ui.flash("Steps loaded. Open the Step fund tab to see them.")
             st.rerun()
         except step_tracker.StepFileError as error:
             st.error(str(error))
@@ -243,9 +249,11 @@ with st.sidebar:
     sample_column, remove_column = st.columns(2)
     if sample_column.button("Sample", use_container_width=True, help="Try it with made-up steps."):
         set_steps(step_tracker.sample_steps())
+        ui.flash("Sample steps loaded. Open the Step fund tab to see them.")
         st.rerun()
     if remove_column.button("Remove", use_container_width=True, help="Delete the step data."):
         set_steps(None)
+        ui.flash("Step data removed.")
         st.rerun()
 
     st.caption(
@@ -264,21 +272,49 @@ with st.sidebar:
 def dashboard(positions, capital, gross_limit, target_net, steps):
     entered_positions = positions
     tickers = sorted(set(positions["Ticker"]))
+
+    # Show placeholder blocks while data loads for the first time.
+    loading = st.empty()
+    if not st.session_state.get("loaded_once"):
+        loading.html(ui.skeleton())
     market = fetch_market_data(tuple(sorted(set(tickers) | {BENCHMARK})))
     benchmark = market.get(BENCHMARK)
+    valid_tickers = sorted(set(tickers) & set(market))
+    company = fetch_company_info(tuple(valid_tickers)) if valid_tickers else {}
+    loading.empty()
+
+    if not market:
+        ui.empty_state(
+            "Couldn't load market prices",
+            "AlphaScope couldn't reach Yahoo Finance. Check your internet "
+            "connection, then try again.",
+        )
+        if st.button("Try again", type="primary"):
+            fetch_market_data.clear()
+            st.rerun()
+        return
 
     missing = sorted(set(tickers) - set(market))
     if missing:
         st.warning(
-            f"No market data found for {', '.join(missing)}. Check the ticker "
-            "symbols or your internet connection. They are left out below."
+            f"No prices found for {', '.join(missing)}, so "
+            f"{'it is' if len(missing) == 1 else 'they are'} left out. Check the "
+            "spelling of the ticker in Edit positions."
         )
     positions = positions[positions["Ticker"].isin(market)].copy()
     if positions.empty:
-        st.info("Add at least one valid position to see the dashboard.")
+        ui.empty_state(
+            "No valid stocks yet",
+            "None of the tickers in your positions were found. Fix them in "
+            "Edit positions above, or load the sample portfolio.",
+        )
+        if st.button("Load sample portfolio", type="primary"):
+            load_positions(SAMPLE_POSITIONS)
+            ui.flash("Sample portfolio loaded.")
+            st.rerun()
         return
-    tickers = sorted(set(positions["Ticker"]))
-    company = fetch_company_info(tuple(tickers))
+    st.session_state.loaded_once = True
+    tickers = valid_tickers
     first_entry = pd.Timestamp(min(positions["Entry date"]))
 
     # --- Step fund: steps since the first position earn step credit ---------
@@ -454,48 +490,56 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
     positions["Why"] = positions.apply(explain, axis=1)
     changes = positions[positions["Action"] != "Hold"]
 
-    # --- Headline numbers stay visible above every tab ------------------------
-    headline = st.columns(6)
-    headline[0].metric(
-        "Portfolio value", f"${capital + total_pnl:,.0f}", f"{portfolio_return:+.2f}%"
+    # --- One headline number, then a few supporting ones -----------------------
+    if versus_market is None:
+        context = ""
+    elif versus_market >= 0:
+        context = f" · {versus_market:.1f} points ahead of the S&P 500"
+    else:
+        context = f" · {abs(versus_market):.1f} points behind the S&P 500"
+    ui.hero(
+        "Portfolio value",
+        f"${capital + total_pnl:,.0f}",
+        f"{abs(portfolio_return):.2f}% (${abs(total_pnl):,.0f}) since {first_entry:%b} {first_entry.day}, {first_entry.year}",
+        is_gain=total_pnl >= 0,
+        context=context,
     )
-    headline[1].metric("Profit / loss", f"${total_pnl:+,.0f}")
-    headline[2].metric(
-        "vs S&P 500",
-        show(versus_market, "{:+.1f} pts"),
-        help=(
-            "Your return minus the return from putting the same capital in the "
-            "S&P 500 since your first position. Positive means you beat the market."
-        ),
+
+    supporting = st.columns(4)
+    supporting[0].metric(
+        f"Net exposure (goal {target_net:+d}%)",
+        f"{net_exposure:+.0f}%",
+        help="Long weight minus short weight.",
     )
-    headline[3].metric(
-        "Net exposure", f"{net_exposure:+.0f}%", help="Long weight minus short weight."
-    )
-    headline[4].metric(
-        f"Gross (limit {gross_limit}%)",
+    supporting[1].metric(
+        f"Gross exposure (limit {gross_limit}%)",
         f"{gross_exposure:.0f}%",
         help="Long weight plus short weight.",
     )
-    headline[5].metric(
+    supporting[2].metric(
         "Beta",
         show(portfolio_beta if benchmark else None, "{:.2f}"),
         help="How much the portfolio tends to move when the market moves 1%.",
+    )
+    supporting[3].metric(
+        "Changes recommended",
+        f"{len(changes)} of {len(positions)}",
+        help="Positions with a recommended add, trim, or close. See the Ideas tab.",
     )
 
     latest_trade = max(data["time"] or 0 for data in market.values())
     latest_trade = datetime.fromtimestamp(latest_trade, ZoneInfo("America/New_York"))
     st.caption(
-        f"Latest market price: {latest_trade:%b %d, %I:%M %p} New York time. "
-        "When the market is closed, the closing price is shown."
+        f"Prices as of {latest_trade:%b %d, %I:%M %p} New York time, refreshed "
+        "every minute. When the market is closed, closing prices are shown."
     )
 
     (
         overview, holdings, reasoning, risk, pairs, ideas, step_fund, news, screen
     ) = st.tabs(
         [
-            "📈 Overview", "📋 Holdings", "🧠 Reasoning", "⚖️ Risk & sectors",
-            "🔗 Pair trades", "💡 Ideas", "👟 Step fund", "📰 News",
-            "🔎 Valuation screen",
+            "Overview", "Holdings", "Reasoning", "Risk", "Pair trades",
+            "Ideas", "Step fund", "News", "Valuation screen",
         ]
     )
 
@@ -507,24 +551,49 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                 f"{gross_limit}% limit. Reduce position sizes or raise the limit."
             )
 
-        left, middle, right = st.columns(3)
-        with left:
-            st.subheader("Value vs S&P 500")
+        chart_column, next_column = st.columns([3, 2], gap="large")
+        with chart_column:
+            st.subheader("Your portfolio against the S&P 500")
             st.altair_chart(charts.value_chart(history), use_container_width=True)
-        with middle:
-            st.subheader("Profit / loss by position")
-            st.altair_chart(charts.profit_chart(positions), use_container_width=True)
-        with right:
-            st.subheader("Exposure by position")
-            st.altair_chart(charts.exposure_chart(positions), use_container_width=True)
+        with next_column:
+            if changes.empty:
+                ui.card(
+                    "Recommended next",
+                    [("Hold everything", "no position has both signals against it", "")],
+                    footer="Looking to add something? Open the Ideas tab.",
+                )
+            else:
+                tones = {"Add": "gain", "Trim": "loss", "Close": "loss"}
+                reasons = {
+                    "Add": "both signals agree with you",
+                    "Trim": "signals lean against you",
+                    "Close": "both signals are against you",
+                }
+                ui.card(
+                    "Recommended next",
+                    [
+                        (f"{row.Action} {row.Ticker}", reasons[row.Action], tones[row.Action])
+                        for row in changes.head(5).itertuples()
+                    ],
+                    footer="Open the Ideas tab to see why and apply the changes.",
+                )
 
-        st.progress(
-            min(gross_exposure / gross_limit, 1.0),
-            text=(
-                f"Using {gross_exposure:.0f}% of your {gross_limit}% gross exposure "
-                f"limit — {long_exposure:.0f}% long, {short_exposure:.0f}% short."
-            ),
-        )
+        with st.expander("Show profit and exposure by position"):
+            profit_column, exposure_column = st.columns(2, gap="large")
+            with profit_column:
+                st.subheader("Profit or loss")
+                st.altair_chart(charts.profit_chart(positions), use_container_width=True)
+            with exposure_column:
+                st.subheader("Exposure")
+                st.altair_chart(charts.exposure_chart(positions), use_container_width=True)
+            st.progress(
+                min(gross_exposure / gross_limit, 1.0),
+                text=(
+                    f"Using {gross_exposure:.0f}% of your {gross_limit}% gross "
+                    f"exposure limit: {long_exposure:.0f}% long, "
+                    f"{short_exposure:.0f}% short."
+                ),
+            )
 
     # -----------------------------------------------------------------------
     with holdings:
@@ -671,20 +740,18 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                 )
             )
 
-        sector_column, drawdown_column, table_column = st.columns(3)
+        sector_column, drawdown_column = st.columns(2, gap="large")
         with sector_column:
             st.subheader("Exposure by sector")
             st.altair_chart(charts.sector_chart(positions), use_container_width=True)
         with drawdown_column:
             st.subheader("Drawdown")
             st.altair_chart(charts.drawdown_chart(drawdowns), use_container_width=True)
-        with table_column:
-            st.subheader("Risk by position")
+        with st.expander("Show risk by position"):
             st.dataframe(
                 positions[["Ticker", "Side", "Beta", "Volatility (%)"]],
                 use_container_width=True,
                 hide_index=True,
-                height=charts.CHART_HEIGHT,
                 column_config={
                     "Beta": st.column_config.NumberColumn(format="%.2f"),
                     "Volatility (%)": st.column_config.NumberColumn(format="%.0f%%"),
@@ -697,7 +764,11 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
         shorts = list(dict.fromkeys(positions.loc[positions["Side"] == "Short", "Ticker"]))
 
         if not longs or not shorts:
-            st.info("A pair trade needs at least one long and one short position.")
+            ui.empty_state(
+                "Pair trades need a long and a short",
+                "Add at least one long and one short position in Edit positions, "
+                "ideally two companies in the same industry.",
+            )
         else:
             st.write(
                 "A pair trade matches a long with a short in a similar business, "
@@ -786,7 +857,7 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
     # -----------------------------------------------------------------------
     with ideas:
         changes_area, new_area = st.tabs(
-            ["🔄 Change what you hold", "➕ Add something new"]
+            ["Change what you hold", "Add something new"]
         )
 
         with changes_area:
@@ -859,7 +930,7 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                                 ]
                             ).reset_index(drop=True)
                         )
-                        st.toast("Changes applied. Press Save in the sidebar to keep them.")
+                        ui.flash("Changes applied. Press Save in the sidebar to keep them.")
                         st.rerun()
 
             st.caption(
@@ -1064,14 +1135,18 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
     # -----------------------------------------------------------------------
     with step_fund:
         if steps is None:
-            st.write(
-                "Turn your steps into money to invest. Every step earns step "
-                "credit (10,000 steps = $1), which is invested in the "
-                "portfolio. Step credit cannot be cashed out, but the profit "
-                "it makes can. "
-                "Upload a health app export in the sidebar, or press "
-                "**Sample** there to try it with made-up steps."
+            ui.empty_state(
+                "Turn your steps into money to invest",
+                "Every 10,000 steps earn $1 of step credit, which is invested "
+                "in your portfolio. The credit stays invested, and the profit "
+                "it makes is yours to cash out. Upload a health app export in "
+                "the sidebar to start.",
             )
+            if st.button("Try it with sample steps", type="primary"):
+                set_steps(step_tracker.sample_steps())
+                ui.flash("Sample steps loaded.")
+                st.rerun()
+            st.subheader("How to export your steps")
             apple, fitbit, google, other = st.columns(4)
             apple.markdown(
                 "**Apple Health**\n\nOpen the Health app, tap your picture, then "
@@ -1156,7 +1231,7 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                 type="primary",
             ):
                 set_cashed_out(cashed_out + available)
-                st.toast(f"Cashed out ${available:,.2f} of profit.")
+                ui.flash(f"Cashed out ${available:,.2f} of profit.")
                 st.rerun()
             if step_profit < 0:
                 rule_column.caption(
@@ -1180,9 +1255,9 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
             with growth_column:
                 st.subheader("Step credit and what it has grown to")
                 colors = {
-                    "Step credit (locked)": charts.NEUTRAL_COLOR,
-                    "Value in your portfolio": charts.LONG_COLOR,
-                    "If invested in the S&P 500": charts.SHORT_COLOR,
+                    "Step credit (locked)": charts.STEP_COLOR,
+                    "Value in your portfolio": charts.ACTION_COLOR,
+                    "If invested in the S&P 500": charts.NEUTRAL_COLOR,
                 }
                 st.altair_chart(
                     charts.line_chart(
@@ -1234,6 +1309,11 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                         f"- [{article['title']}]({article['link']}) "
                         f"· {article['published']}"
                     )
+        if not news_tickers:
+            ui.empty_state(
+                "Choose a stock to see its news",
+                "Pick one or more of your holdings in the box above.",
+            )
         st.caption("Headlines come from Yahoo Finance and refresh every 15 minutes.")
 
     # -----------------------------------------------------------------------
@@ -1324,6 +1404,14 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
 
 
 if edited_positions.empty:
-    st.info("Open **Edit positions** above and add at least one stock.")
+    ui.empty_state(
+        "Start your portfolio",
+        "Add your first stock in Edit positions above, or load the sample "
+        "portfolio to look around.",
+    )
+    if st.button("Load sample portfolio", type="primary"):
+        load_positions(SAMPLE_POSITIONS)
+        ui.flash("Sample portfolio loaded.")
+        st.rerun()
 else:
     dashboard(edited_positions, capital, gross_limit, GOALS[goal], st.session_state.steps)
