@@ -262,6 +262,7 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 @st.fragment(run_every=PRICE_REFRESH_SECONDS)
 def dashboard(positions, capital, gross_limit, target_net, steps):
+    entered_positions = positions
     tickers = sorted(set(positions["Ticker"]))
     market = fetch_market_data(tuple(sorted(set(tickers) | {BENCHMARK})))
     benchmark = market.get(BENCHMARK)
@@ -394,6 +395,64 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
     sector_net = positions.groupby("Sector")["Signed weight (%)"].sum()
     biggest_sector = sector_net.abs().idxmax()
     biggest_sector_net = sector_net[biggest_sector]
+
+    # --- Recommended changes to existing positions -----------------------------
+    positions["Action"] = positions["Verdict"].map(analysis.recommended_action)
+    # Do not add to a position that is already large.
+    too_large = (
+        positions.groupby("Ticker")["Weight (%)"].transform("sum") > analysis.LARGE_POSITION
+    )
+    positions.loc[(positions["Action"] == "Add") & too_large, "Action"] = "Hold"
+
+    def plan_shares():
+        return pd.Series(
+            [
+                analysis.shares_after(action, shares)
+                for action, shares in zip(positions["Action"], positions["Shares"])
+            ],
+            index=positions.index,
+        )
+
+    def weights_after(shares):
+        return direction * shares * positions["Live price ($)"] / capital * 100
+
+    positions["Shares after"] = plan_shares()
+    if weights_after(positions["Shares after"]).abs().sum() > gross_limit:
+        # Adding would break the gross exposure limit, so only reduce.
+        positions.loc[positions["Action"] == "Add", "Action"] = "Hold"
+        positions["Shares after"] = plan_shares()
+
+    signed_after = weights_after(positions["Shares after"])
+    net_after = signed_after.sum()
+    gross_after = signed_after.abs().sum()
+    beta_after = (signed_after / 100 * positions["Beta"]).sum()
+
+    def explain(row):
+        """One sentence on why the action is recommended."""
+        signals = f"trend is {row['Trend']} and fundamentals are {row['Fundamentals']}"
+        side = row["Side"].lower()
+        if row["Action"] == "Add":
+            reason = f"Both signals back your {side}: {signals}."
+        elif row["Action"] == "Close":
+            reason = f"Both signals go against your {side}: {signals}."
+        elif row["Action"] == "Trim":
+            reason = f"The signals lean against your {side}: {signals}."
+        elif row["Verdict"].startswith("🟢 Strongly"):
+            reason = f"Both signals back your {side}, but the position is already large."
+        else:
+            reason = f"No strong case to change: {signals}."
+
+        change = analysis.trend_change(market[row["Ticker"]]["closes"])
+        if change:
+            turning_against = (change[0] == "down") == (row["Side"] == "Long")
+            reason += (
+                f" {'⚠️ Turning against you' if turning_against else '✅ Turning your way'}: "
+                f"{change[1]}."
+            )
+        return reason
+
+    positions["Why"] = positions.apply(explain, axis=1)
+    changes = positions[positions["Action"] != "Hold"]
 
     # --- Headline numbers stay visible above every tab ------------------------
     headline = st.columns(6)
@@ -726,7 +785,91 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
 
     # -----------------------------------------------------------------------
     with ideas:
-        suggestion_column, test_column = st.columns(2)
+        changes_area, new_area = st.tabs(
+            ["🔄 Change what you hold", "➕ Add something new"]
+        )
+
+        with changes_area:
+            table_column, summary_column = st.columns([3, 2])
+            with table_column:
+                st.dataframe(
+                    positions[
+                        ["Ticker", "Side", "Verdict", "Action", "Shares", "Shares after", "Why"]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Shares": st.column_config.NumberColumn("Shares now", format="%.0f"),
+                        "Shares after": st.column_config.NumberColumn(format="%.0f"),
+                        "Why": st.column_config.TextColumn(width="large"),
+                    },
+                )
+            with summary_column:
+                if changes.empty:
+                    st.success(
+                        "No changes recommended. None of your positions has both "
+                        "signals clearly for or against it."
+                    )
+                else:
+                    for action in ["Close", "Trim", "Add"]:
+                        names = changes.loc[changes["Action"] == action, "Ticker"]
+                        if not names.empty:
+                            st.markdown(f"**{action}:** {', '.join(names)}")
+
+                    st.caption("If you make every recommended change:")
+                    effect = st.columns(3)
+                    effect[0].metric(
+                        "Net exposure", f"{net_after:+.0f}%",
+                        f"{net_after - net_exposure:+.0f} pts", delta_color="off",
+                    )
+                    effect[1].metric(
+                        "Gross exposure", f"{gross_after:.0f}%",
+                        f"{gross_after - gross_exposure:+.0f} pts", delta_color="off",
+                    )
+                    effect[2].metric(
+                        "Beta", f"{beta_after:.2f}",
+                        f"{beta_after - portfolio_beta:+.2f}", delta_color="off",
+                    )
+
+                    if abs(target_net - net_after) < abs(target_net - net_exposure):
+                        st.caption(f"This moves you closer to your {target_net:+d}% net goal.")
+                    else:
+                        st.caption(
+                            f"This moves you further from your {target_net:+d}% net "
+                            "goal, so consider rebalancing afterwards."
+                        )
+
+                    if st.button("Apply these changes", type="primary", use_container_width=True):
+                        # Trims and closes shrink the existing rows.
+                        updated = positions[positions["Shares after"] > 0].copy()
+                        updated["Shares"] = updated[["Shares", "Shares after"]].min(axis=1)
+                        # Added shares are bought today, so they get their own
+                        # row with today's date and start with no profit.
+                        added = positions[positions["Action"] == "Add"].copy()
+                        added["Shares"] = added["Shares after"] - added["Shares"]
+                        added["Entry date"] = date.today()
+                        # Keep any rows that had no market data untouched.
+                        unknown = entered_positions[~entered_positions["Ticker"].isin(market)]
+                        load_positions(
+                            pd.concat(
+                                [
+                                    updated[POSITION_COLUMNS],
+                                    added[POSITION_COLUMNS],
+                                    unknown[POSITION_COLUMNS],
+                                ]
+                            ).reset_index(drop=True)
+                        )
+                        st.toast("Changes applied. Press Save in the sidebar to keep them.")
+                        st.rerun()
+
+            st.caption(
+                "Rules: Add (+25% shares) when trend and fundamentals both back "
+                "your side, Trim (half) when the signals lean against it, Close "
+                "when both go against it, otherwise Hold. These rules use past "
+                "prices and reported financials and are not investment advice."
+            )
+
+        suggestion_column, test_column = new_area.columns(2)
 
         with suggestion_column:
             st.subheader("What to add next")

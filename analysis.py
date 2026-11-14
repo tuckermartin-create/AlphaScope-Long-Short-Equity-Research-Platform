@@ -143,6 +143,68 @@ def combined_verdict(side, trend, fundamentals):
 
 
 # ---------------------------------------------------------------------------
+# Recommended changes
+# ---------------------------------------------------------------------------
+ADD_FRACTION = 0.25  # "Add" grows a position by a quarter.
+LARGE_POSITION = 15  # Do not add to positions above this % of capital.
+
+
+def recommended_action(verdict):
+    """Turn a verdict into an action for an existing position."""
+    if verdict.startswith("🟢 Strongly"):
+        return "Add"
+    if verdict.startswith("🔴 Strongly"):
+        return "Close"
+    if verdict.startswith("🔴"):
+        return "Trim"
+    return "Hold"
+
+
+def shares_after(action, shares):
+    """How many shares the position should have after the action."""
+    if action == "Close":
+        return 0
+    if action == "Trim":
+        return max(1, round(shares / 2))
+    if action == "Add":
+        return -(-shares * (1 + ADD_FRACTION) // 1)  # Round up to whole shares.
+    return shares
+
+
+def trend_change(closes, lookback=10):
+    """Report whether the trend turned in the last two weeks of trading.
+
+    Returns ("up" or "down", description), or None if nothing changed.
+    """
+    if len(closes) < 200 + lookback:
+        return None
+
+    average_50 = closes.rolling(50).mean()
+    average_200 = closes.rolling(200).mean()
+    before = -1 - lookback
+
+    price_above_now = closes.iloc[-1] > average_200.iloc[-1]
+    price_above_before = closes.iloc[before] > average_200.iloc[before]
+    if price_above_now != price_above_before:
+        direction = "up" if price_above_now else "down"
+        return direction, (
+            f"the price crossed {'above' if price_above_now else 'below'} its "
+            "200-day average in the last two weeks"
+        )
+
+    average_above_now = average_50.iloc[-1] > average_200.iloc[-1]
+    average_above_before = average_50.iloc[before] > average_200.iloc[before]
+    if average_above_now != average_above_before:
+        direction = "up" if average_above_now else "down"
+        return direction, (
+            f"the 50-day average crossed {'above' if average_above_now else 'below'} "
+            "the 200-day average in the last two weeks"
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Risk measures
 # ---------------------------------------------------------------------------
 def daily_returns(closes, days=TRADING_DAYS_PER_YEAR):

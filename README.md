@@ -47,9 +47,14 @@ investors, and aspiring equity research analysts.
 - **Pair trades tab.** Match a long against a short, see how the two have
   moved, their correlation, the pair's profit or loss, and whether the pair is
   in the same sector and balanced in size.
-- **Ideas tab.** Rule-based suggestions for what to add next, and a tester
-  that shows how a new stock would change exposure and whether its trend,
-  fundamentals, or the user's fair-value estimate support it.
+- **Ideas tab.**
+  - *Change what you hold:* a recommended action for every position (add,
+    hold, trim, or close) based on its trend and fundamentals, alerts when a
+    trend has just turned, the effect on net exposure, gross exposure, and
+    beta, and a button that applies the changes to the positions table.
+  - *Add something new:* rule-based suggestions for what to add next, and a
+    tester that shows how a new stock would change exposure and whether its
+    trend, fundamentals, or the user's fair-value estimate support it.
 - **Step fund tab.** Upload a health app export (Apple Health, Fitbit, Google
   Fit, or any CSV with dates and steps). Every step earns step credit at a fixed
   rate (10,000 steps = $1). Step credit works like bonus money: it is
