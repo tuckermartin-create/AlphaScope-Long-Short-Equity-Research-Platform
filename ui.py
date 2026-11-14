@@ -13,17 +13,32 @@ from html import escape
 import streamlit as st
 
 
-INK = "#14171A"
-MUTED = "#5B6470"
-BORDER = "#E5E3DC"
-PAGE = "#FAFAF7"
-CARD = "#FFFFFF"
-ACTION = "#1F4FD8"
-GAIN = "#0E8A5F"
-LOSS = "#C8372D"
-STEP = "#B5661A"
+# Two palettes: the design is light, but the pieces below must stay readable
+# if Streamlit is showing its dark theme (for example before a restart picks
+# up .streamlit/config.toml, or if someone switches theme in the menu).
+LIGHT = {
+    "ink": "#14171A", "muted": "#5B6470", "border": "#E5E3DC", "card": "#FFFFFF",
+    "action": "#1F4FD8", "gain": "#0E8A5F", "loss": "#C8372D",
+    "skeleton_a": "#EFEDE6", "skeleton_b": "#F7F6F1",
+    "disabled_bg": "#C9CDD3", "disabled_text": "#5B6470",
+}
+DARK = {
+    "ink": "#F2F2F0", "muted": "#A9AEB6", "border": "#343841", "card": "#1A1D24",
+    "action": "#4F74E8", "gain": "#3DBE8B", "loss": "#F0766A",
+    "skeleton_a": "#1E2128", "skeleton_b": "#2A2E37",
+    "disabled_bg": "#343841", "disabled_text": "#A9AEB6",
+}
 
-STYLES = f"""
+
+def palette():
+    """The colors that match the theme Streamlit is currently showing."""
+    try:
+        return DARK if st.context.theme.type == "dark" else LIGHT
+    except Exception:
+        return LIGHT
+
+
+STYLES = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500&family=Inter:wght@400;500;600&display=swap');
 
@@ -42,14 +57,13 @@ h1, h2, h3, [data-testid="stMetricValue"] {{
 [data-testid="stMetricValue"] {{ font-variant-numeric: tabular-nums; }}
 .block-container {{ padding-top: 3rem; padding-bottom: 4rem; max-width: 1200px; }}
 
-/* Page colors, so the look holds even before the theme file is picked up. */
-.stApp {{ background: {PAGE}; color: {INK}; }}
-[data-testid="stSidebar"] {{ background: #F1EFE8; }}
+/* Primary buttons use the design's action color in either theme. */
 button[kind="primary"], button[data-testid="stBaseButton-primary"] {{
-    background: {ACTION} !important; border-color: {ACTION} !important; color: #FFFFFF !important;
+    background: {action} !important; border-color: {action} !important; color: #FFFFFF !important;
 }}
 button[kind="primary"]:disabled, button[data-testid="stBaseButton-primary"]:disabled {{
-    background: #C9CDD3 !important; border-color: #C9CDD3 !important; color: #5B6470 !important;
+    background: {disabled_bg} !important; border-color: {disabled_bg} !important;
+    color: {disabled_text} !important;
 }}
 
 /* Numbers and labels wrap instead of being cut off on narrow screens. */
@@ -72,44 +86,44 @@ button[kind="primary"]:disabled, button[data-testid="stBaseButton-primary"]:disa
 /* A clear focus ring for keyboard users. */
 button:focus-visible, input:focus-visible, [data-baseweb="tab"]:focus-visible,
 summary:focus-visible, a:focus-visible {{
-    outline: 3px solid {ACTION} !important;
+    outline: 3px solid {action} !important;
     outline-offset: 2px;
 }}
 
 .as-hero {{ margin: 8px 0 24px; }}
-.as-eyebrow {{ font-size: 14px; color: {MUTED}; margin-bottom: 4px; }}
+.as-eyebrow {{ font-size: 14px; color: {muted}; margin-bottom: 4px; }}
 .as-hero-number {{
     font-family: 'Fraunces', Georgia, serif; font-weight: 500;
-    font-size: clamp(40px, 7vw, 64px); line-height: 1.1; color: {INK};
+    font-size: clamp(40px, 7vw, 64px); line-height: 1.1; color: {ink};
     font-variant-numeric: tabular-nums;
 }}
-.as-hero-line {{ font-size: 16px; margin-top: 8px; color: {INK}; }}
-.as-gain {{ color: {GAIN}; font-weight: 600; }}
-.as-loss {{ color: {LOSS}; font-weight: 600; }}
-.as-muted {{ color: {MUTED}; }}
+.as-hero-line {{ font-size: 16px; margin-top: 8px; color: {ink}; }}
+.as-gain {{ color: {gain}; font-weight: 600; }}
+.as-loss {{ color: {loss}; font-weight: 600; }}
+.as-muted {{ color: {muted}; }}
 
 .as-card {{
-    background: {CARD}; border: 1px solid {BORDER}; border-radius: 12px;
+    background: {card}; border: 1px solid {border}; border-radius: 12px;
     padding: 24px; margin-bottom: 16px;
 }}
 .as-card h3 {{ margin: 0 0 12px; font-size: 20px; padding: 0; }}
 .as-row {{
     display: flex; justify-content: space-between; gap: 16px;
-    padding: 12px 0; border-top: 1px solid {BORDER}; font-size: 15px;
+    padding: 12px 0; border-top: 1px solid {border}; font-size: 15px;
 }}
 .as-row:first-of-type {{ border-top: none; }}
 .as-row strong {{ font-weight: 600; }}
 
 .as-empty {{
-    background: {CARD}; border: 1px dashed {BORDER}; border-radius: 12px;
+    background: {card}; border: 1px dashed {border}; border-radius: 12px;
     padding: 40px 24px; text-align: center; margin: 16px 0;
 }}
 .as-empty h3 {{ margin: 0 0 8px; font-size: 22px; padding: 0; }}
-.as-empty p {{ color: {MUTED}; margin: 0 auto; max-width: 480px; font-size: 16px; }}
+.as-empty p {{ color: {muted}; margin: 0 auto; max-width: 480px; font-size: 16px; }}
 
 .as-skeleton {{
     border-radius: 12px; margin-bottom: 16px;
-    background: linear-gradient(90deg, #EFEDE6 25%, #F7F6F1 50%, #EFEDE6 75%);
+    background: linear-gradient(90deg, {skeleton_a} 25%, {skeleton_b} 50%, {skeleton_a} 75%);
     background-size: 200% 100%; animation: as-shimmer 1.4s ease-in-out infinite;
 }}
 @keyframes as-shimmer {{ from {{ background-position: 200% 0; }} to {{ background-position: -200% 0; }} }}
@@ -126,7 +140,7 @@ summary:focus-visible, a:focus-visible {{
 
 def apply_styles():
     """Add the app's fonts and styles to the page."""
-    st.html(STYLES)
+    st.html(STYLES.format(**palette()))
 
 
 # ---------------------------------------------------------------------------

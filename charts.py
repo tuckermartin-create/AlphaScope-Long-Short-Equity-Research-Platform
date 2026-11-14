@@ -18,11 +18,13 @@ def styled(chart):
     return (
         chart.configure(background="transparent", font="Inter")
         .configure_view(strokeWidth=0)
+        # Semi-transparent grey lines read on both light and dark backgrounds;
+        # Streamlit colors the labels to match its theme.
         .configure_axis(
-            gridColor="#E5E3DC", domainColor="#E5E3DC", tickColor="#E5E3DC",
-            labelColor="#5B6470", titleColor="#5B6470", labelFontSize=12, titleFontSize=12,
+            gridColor="rgba(128,128,128,0.25)", domainColor="rgba(128,128,128,0.25)",
+            tickColor="rgba(128,128,128,0.25)", labelFontSize=12, titleFontSize=12,
         )
-        .configure_legend(labelColor="#14171A", labelFontSize=13, symbolStrokeWidth=3)
+        .configure_legend(labelFontSize=13, symbolStrokeWidth=3)
     )
 
 SIDE_COLORS = alt.Scale(domain=["Long", "Short"], range=[LONG_COLOR, SHORT_COLOR])
