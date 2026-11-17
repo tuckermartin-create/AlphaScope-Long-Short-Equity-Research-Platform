@@ -36,6 +36,13 @@ investors, and aspiring equity research analysts.
   position, and exposure by position.
 - **Holdings tab.** Entry price, live price, today's change, value, weight,
   return, and profit or loss for every position.
+- **Trades tab.** Close all or part of a position at today's price (sell a
+  long or buy back a short), with a preview of the profit it locks in. Every
+  closed trade, including trims and closes from the Ideas tab, goes into a
+  trade history. The app shows realized profit (from closed trades)
+  separately from unrealized profit (on positions still held), and both count
+  toward portfolio value. The history can be downloaded as a CSV file and is
+  kept on the user's computer.
 - **Reasoning tab.** Two signals for each stock, and whether they support or
   conflict with the chosen side:
   - *Trend:* price against its 200-day average, 50-day against 200-day
@@ -86,7 +93,6 @@ The app follows one visual direction, called "Clear ledger":
 
 ## Planned features
 
-- Record closed trades so realized profit is tracked along with open positions.
 - Trading costs and the cost of borrowing shares for short positions.
 - Position sizing based on risk, so volatile stocks get smaller weights.
 - Alerts when a position hits a price target or a stop-loss level.

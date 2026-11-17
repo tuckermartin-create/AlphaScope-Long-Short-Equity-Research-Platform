@@ -22,10 +22,15 @@ from market_data import (
 SAVE_FILE = Path(__file__).with_name("my_portfolio.csv")
 STEPS_FILE = Path(__file__).with_name("my_steps.csv")
 CASH_OUT_FILE = Path(__file__).with_name("my_step_cash_outs.json")
+TRADES_FILE = Path(__file__).with_name("my_trades.csv")
 
 # The Step fund rate is fixed: 10,000 steps earn $1.
 CENTS_PER_STEP = 0.01
 POSITION_COLUMNS = ["Ticker", "Side", "Shares", "Entry date"]
+TRADE_COLUMNS = [
+    "Ticker", "Side", "Shares", "Entry date", "Entry price ($)",
+    "Exit date", "Exit price ($)", "Profit / loss ($)",
+]
 
 GOALS = {
     "Market neutral (net near 0%)": 0,
@@ -68,6 +73,32 @@ def load_positions(positions):
     st.session_state.editor_version = st.session_state.get("editor_version", 0) + 1
 
 
+def read_trades():
+    """Load the closed-trade history, or start an empty one."""
+    try:
+        trades = pd.read_csv(TRADES_FILE)[TRADE_COLUMNS]
+        for column in ["Entry date", "Exit date"]:
+            trades[column] = pd.to_datetime(trades[column]).dt.date
+        return trades
+    except Exception:
+        return pd.DataFrame(columns=TRADE_COLUMNS)
+
+
+def record_sales(sales, remaining_positions):
+    """Add closed trades to the history and save it together with the positions.
+
+    Both are saved at the same moment so they can't get out of step: a sale
+    must never be in the history while its shares are still in the portfolio.
+    """
+    trades = pd.concat(
+        [st.session_state.trades, sales[TRADE_COLUMNS]], ignore_index=True
+    ) if not st.session_state.trades.empty else sales[TRADE_COLUMNS].reset_index(drop=True)
+    st.session_state.trades = trades
+    trades.to_csv(TRADES_FILE, index=False)
+    remaining_positions.to_csv(SAVE_FILE, index=False)
+    load_positions(remaining_positions)
+
+
 def set_steps(steps):
     """Use a new set of daily step counts and keep them for next time."""
     st.session_state.steps = steps
@@ -85,6 +116,12 @@ def set_cashed_out(amount):
         CASH_OUT_FILE.write_text(json.dumps({"cashed_out": amount}))
     else:
         CASH_OUT_FILE.unlink(missing_ok=True)
+
+
+def signed_money(value, decimals=0):
+    """Format a gain or loss as +$1,234 or −$1,234."""
+    sign = "−" if value < 0 else "+"
+    return f"{sign}${abs(value):,.{decimals}f}"
 
 
 def show(value, pattern):
@@ -111,6 +148,10 @@ if "base_positions" not in st.session_state:
         load_positions(read_positions(SAVE_FILE))
     except Exception:
         load_positions(SAMPLE_POSITIONS)
+
+# Closed trades are kept on this computer.
+if "trades" not in st.session_state:
+    st.session_state.trades = read_trades()
 
 # Step counts from an earlier upload are kept on this computer.
 if "steps" not in st.session_state:
@@ -199,8 +240,14 @@ with st.sidebar:
         edited_positions.to_csv(SAVE_FILE, index=False)
         load_positions(edited_positions.reset_index(drop=True))
         st.toast("Portfolio saved. It loads automatically next time.", icon="✅")
-    if reset_column.button("Reset", use_container_width=True, help="Go back to the sample portfolio."):
+    if reset_column.button(
+        "Reset",
+        use_container_width=True,
+        help="Go back to the sample portfolio and clear your trade history.",
+    ):
         SAVE_FILE.unlink(missing_ok=True)
+        TRADES_FILE.unlink(missing_ok=True)
+        st.session_state.trades = pd.DataFrame(columns=TRADE_COLUMNS)
         load_positions(SAMPLE_POSITIONS)
         ui.flash("Back to the sample portfolio.")
         st.rerun()
@@ -277,7 +324,11 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
     loading = st.empty()
     if not st.session_state.get("loaded_once"):
         loading.html(ui.skeleton())
-    market = fetch_market_data(tuple(sorted(set(tickers) | {BENCHMARK})))
+    trades = st.session_state.trades
+    # Closed trades need prices too, to draw their part of the value chart.
+    market = fetch_market_data(
+        tuple(sorted(set(tickers) | set(trades["Ticker"]) | {BENCHMARK}))
+    )
     benchmark = market.get(BENCHMARK)
     valid_tickers = sorted(set(tickers) & set(market))
     company = fetch_company_info(tuple(valid_tickers)) if valid_tickers else {}
@@ -315,7 +366,7 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
         return
     st.session_state.loaded_once = True
     tickers = valid_tickers
-    first_entry = pd.Timestamp(min(positions["Entry date"]))
+    first_entry = pd.Timestamp(min(list(positions["Entry date"]) + list(trades["Entry date"])))
 
     # --- Step fund: steps since the first position earn step credit ---------
     # Step credit is added to capital and invested. Profit that has already
@@ -363,7 +414,11 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
     short_exposure = positions.loc[positions["Side"] == "Short", "Weight (%)"].sum()
     net_exposure = long_exposure - short_exposure
     gross_exposure = long_exposure + short_exposure
-    total_pnl = positions["Profit / loss ($)"].sum()
+    # Realized profit is locked in by closed trades; unrealized profit is on
+    # positions still held and moves with prices.
+    unrealized_pnl = positions["Profit / loss ($)"].sum()
+    realized_pnl = trades["Profit / loss ($)"].sum() if not trades.empty else 0.0
+    total_pnl = unrealized_pnl + realized_pnl
     portfolio_return = total_pnl / capital * 100
 
     # --- Portfolio value over time, against the S&P 500 ----------------------
@@ -381,6 +436,33 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
         sign = 1 if side == "Long" else -1
         held = days >= pd.Timestamp(entry_date)
         profit_by_day += (sign * shares * (prices - entry)).where(held, 0).fillna(0)
+
+    # A closed trade moves with its price while it was open, then stays at the
+    # profit it locked in from the day it closed.
+    for ticker, side, shares, entry_date, entry, exit_date, realized in zip(
+        trades["Ticker"], trades["Side"], trades["Shares"], trades["Entry date"],
+        trades["Entry price ($)"], trades["Exit date"], trades["Profit / loss ($)"],
+    ):
+        closed = days >= pd.Timestamp(exit_date)
+        path = pd.Series(0.0, index=days)
+        if ticker in market:
+            prices = market[ticker]["closes"].reindex(days).ffill()
+            sign = 1 if side == "Long" else -1
+            held = (days >= pd.Timestamp(entry_date)) & ~closed
+            path = (sign * shares * (prices - entry)).where(held, 0).fillna(0)
+        profit_by_day += path.where(~closed, realized)
+
+    def sale_rows(rows, shares_sold):
+        """Closed trades for selling (or buying back) shares at today's price."""
+        sold = rows.copy()
+        sold["Shares"] = shares_sold
+        sold["Exit date"] = date.today()
+        sold["Exit price ($)"] = sold["Live price ($)"]
+        sign = sold["Side"].map({"Long": 1, "Short": -1})
+        sold["Profit / loss ($)"] = (
+            sign * sold["Shares"] * (sold["Exit price ($)"] - sold["Entry price ($)"])
+        )
+        return sold
 
     history = pd.DataFrame({"Portfolio": capital + profit_by_day})
     versus_market = None
@@ -535,10 +617,11 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
     )
 
     (
-        overview, holdings, reasoning, risk, pairs, ideas, step_fund, news, screen
+        overview, holdings, trades_tab, reasoning, risk, pairs, ideas,
+        step_fund, news, screen,
     ) = st.tabs(
         [
-            "Overview", "Holdings", "Reasoning", "Risk", "Pair trades",
+            "Overview", "Holdings", "Trades", "Reasoning", "Risk", "Pair trades",
             "Ideas", "Step fund", "News", "Valuation screen",
         ]
     )
@@ -625,6 +708,128 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                 "Profit / loss ($)": st.column_config.NumberColumn(format="$%.2f"),
             },
         )
+
+    # -----------------------------------------------------------------------
+    with trades_tab:
+        wins = (trades["Profit / loss ($)"] > 0).sum() if not trades.empty else 0
+        totals = st.columns(4)
+        totals[0].metric(
+            "Realized profit",
+            signed_money(realized_pnl),
+            help="Profit or loss locked in by trades you have closed.",
+        )
+        totals[1].metric(
+            "Unrealized profit",
+            signed_money(unrealized_pnl),
+            help="Profit or loss on positions you still hold. It moves with prices.",
+        )
+        totals[2].metric("Closed trades", f"{len(trades)}")
+        totals[3].metric(
+            "Winning trades",
+            f"{wins / len(trades) * 100:.0f}%" if len(trades) else "n/a",
+            help="Share of closed trades that made money.",
+        )
+
+        sell_column, log_column = st.columns([2, 3], gap="large")
+        with sell_column:
+            st.subheader("Close a position")
+            labels = {
+                index: (
+                    f"{row['Ticker']} · {row['Side']} · {row['Shares']:,.0f} shares · "
+                    f"opened {row['Entry date']:%b} {row['Entry date'].day}"
+                )
+                for index, row in positions.iterrows()
+            }
+            chosen = st.selectbox(
+                "Position", list(labels), format_func=labels.get, key="sell_position"
+            )
+            row = positions.loc[chosen]
+            held_shares = float(row["Shares"])
+            whole = held_shares == int(held_shares)
+            sell_shares = st.number_input(
+                "Shares to close",
+                min_value=min(1.0, held_shares),
+                max_value=held_shares,
+                value=held_shares,
+                step=1.0,
+                format="%.0f" if whole else "%.2f",
+                key=f"sell_shares_{chosen}",
+            )
+            sign = 1 if row["Side"] == "Long" else -1
+            locked_in = sign * sell_shares * (row["Live price ($)"] - row["Entry price ($)"])
+            preview = st.columns(2)
+            preview[0].metric("Price now", f"${row['Live price ($)']:,.2f}")
+            preview[1].metric(
+                "Profit you'd lock in",
+                signed_money(locked_in, 2),
+                help=f"Compared with the entry price of ${row['Entry price ($)']:,.2f}.",
+            )
+            verb = "Sell" if row["Side"] == "Long" else "Buy back"
+            if st.button(
+                f"{verb} {sell_shares:,.{0 if whole else 2}f} shares of {row['Ticker']}",
+                type="primary",
+                use_container_width=True,
+            ):
+                remaining = entered_positions.copy()
+                remaining.loc[chosen, "Shares"] -= sell_shares
+                remaining = remaining[remaining["Shares"] > 1e-9][POSITION_COLUMNS]
+                record_sales(
+                    sale_rows(positions.loc[[chosen]], sell_shares),
+                    remaining.reset_index(drop=True),
+                )
+                ui.flash(
+                    f"{'Sold' if row['Side'] == 'Long' else 'Bought back'} "
+                    f"{row['Ticker']}: {signed_money(locked_in, 2)} recorded. Your portfolio "
+                    "was saved."
+                )
+                st.rerun()
+            st.caption(
+                "Closing saves your portfolio straight away, so the trade and "
+                "your positions stay in step. Editing a position in the table "
+                "is treated as a correction, not a trade."
+            )
+
+        with log_column:
+            st.subheader("Trade history")
+            if trades.empty:
+                ui.empty_state(
+                    "No closed trades yet",
+                    "When you sell a long or buy back a short, here or with "
+                    "Apply these changes on the Ideas tab, the trade and the "
+                    "profit it locked in are recorded here.",
+                )
+            else:
+                log = trades.iloc[::-1].copy()
+                log_sign = log["Side"].map({"Long": 1, "Short": -1})
+                log["Return (%)"] = (
+                    log_sign * (log["Exit price ($)"] / log["Entry price ($)"] - 1) * 100
+                )
+                st.dataframe(
+                    log[
+                        [
+                            "Ticker", "Side", "Shares", "Entry date", "Exit date",
+                            "Entry price ($)", "Exit price ($)", "Return (%)",
+                            "Profit / loss ($)",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Shares": st.column_config.NumberColumn(format="%.0f"),
+                        "Entry date": st.column_config.DateColumn("Opened"),
+                        "Exit date": st.column_config.DateColumn("Closed"),
+                        "Entry price ($)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Exit price ($)": st.column_config.NumberColumn(format="$%.2f"),
+                        "Return (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+                        "Profit / loss ($)": st.column_config.NumberColumn(format="$%+.2f"),
+                    },
+                )
+                st.download_button(
+                    "Download trade history",
+                    trades.to_csv(index=False),
+                    file_name="alphascope_trades.csv",
+                    mime="text/csv",
+                )
 
     # -----------------------------------------------------------------------
     with reasoning:
@@ -803,7 +1008,7 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                 correlation = returns[long_ticker].corr(returns[short_ticker])
 
                 pair_metrics = st.columns(2)
-                pair_metrics[0].metric("Pair profit / loss", f"${pair_pnl:+,.0f}")
+                pair_metrics[0].metric("Pair profit / loss", signed_money(pair_pnl))
                 pair_metrics[1].metric(
                     "Correlation",
                     f"{correlation:.2f}",
@@ -921,16 +1126,28 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                         added["Entry date"] = date.today()
                         # Keep any rows that had no market data untouched.
                         unknown = entered_positions[~entered_positions["Ticker"].isin(market)]
-                        load_positions(
-                            pd.concat(
-                                [
-                                    updated[POSITION_COLUMNS],
-                                    added[POSITION_COLUMNS],
-                                    unknown[POSITION_COLUMNS],
-                                ]
-                            ).reset_index(drop=True)
-                        )
-                        ui.flash("Changes applied. Press Save in the sidebar to keep them.")
+                        remaining = pd.concat(
+                            [
+                                updated[POSITION_COLUMNS],
+                                added[POSITION_COLUMNS],
+                                unknown[POSITION_COLUMNS],
+                            ]
+                        ).reset_index(drop=True)
+                        # Trims and closes are sales, so they go in the history.
+                        reduced = positions[positions["Shares after"] < positions["Shares"]]
+                        if reduced.empty:
+                            load_positions(remaining)
+                            ui.flash("Changes applied. Press Save in the sidebar to keep them.")
+                        else:
+                            record_sales(
+                                sale_rows(reduced, reduced["Shares"] - reduced["Shares after"]),
+                                remaining,
+                            )
+                            ui.flash(
+                                f"Changes applied and saved. {len(reduced)} "
+                                f"sale{'s' if len(reduced) != 1 else ''} recorded "
+                                "on the Trades tab."
+                            )
                         st.rerun()
 
             st.caption(
@@ -1214,7 +1431,7 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
             )
             step_metrics[2].metric(
                 "Profit made by step credit",
-                f"${step_profit:+,.2f}",
+                signed_money(step_profit, 2),
                 help=(
                     "What your step credit has gained or lost by being invested "
                     "in your portfolio from the day it was earned."
