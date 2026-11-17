@@ -84,6 +84,10 @@ button[kind="primary"]:disabled, button[data-testid="stBaseButton-primary"]:disa
 }}
 [data-testid="stMetricDelta"] {{ white-space: normal !important; }}
 
+/* The invisible piece that saves data in the browser takes up no space. */
+.stElementContainer:has(iframe[title*="browser_storage"]),
+.element-container:has(iframe[title*="browser_storage"]) {{ display: none; }}
+
 /* Touch targets of at least 44px. */
 .stButton button, .stDownloadButton button, [data-testid="stFileUploader"] button,
 [data-baseweb="tab"], [data-baseweb="select"] > div, .stTextInput input,

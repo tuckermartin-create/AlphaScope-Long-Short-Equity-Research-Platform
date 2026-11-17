@@ -1,6 +1,4 @@
 from datetime import date, datetime, timedelta
-import json
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -9,6 +7,7 @@ import streamlit as st
 import analysis
 import charts
 import step_tracker
+import storage
 import ui
 from market_data import (
     BENCHMARK,
@@ -18,11 +17,6 @@ from market_data import (
     fetch_news,
 )
 
-
-SAVE_FILE = Path(__file__).with_name("my_portfolio.csv")
-STEPS_FILE = Path(__file__).with_name("my_steps.csv")
-CASH_OUT_FILE = Path(__file__).with_name("my_step_cash_outs.json")
-TRADES_FILE = Path(__file__).with_name("my_trades.csv")
 
 # The Step fund rate is fixed: 10,000 steps earn $1.
 CENTS_PER_STEP = 0.01
@@ -73,49 +67,87 @@ def load_positions(positions):
     st.session_state.editor_version = st.session_state.get("editor_version", 0) + 1
 
 
-def read_trades():
-    """Load the closed-trade history, or start an empty one."""
-    try:
-        trades = pd.read_csv(TRADES_FILE)[TRADE_COLUMNS]
-        for column in ["Entry date", "Exit date"]:
-            trades[column] = pd.to_datetime(trades[column]).dt.date
-        return trades
-    except Exception:
-        return pd.DataFrame(columns=TRADE_COLUMNS)
-
-
 def record_sales(sales, remaining_positions):
-    """Add closed trades to the history and save it together with the positions.
+    """Add closed trades to the history and save them together with the positions.
 
     Both are saved at the same moment so they can't get out of step: a sale
     must never be in the history while its shares are still in the portfolio.
     """
-    trades = pd.concat(
-        [st.session_state.trades, sales[TRADE_COLUMNS]], ignore_index=True
-    ) if not st.session_state.trades.empty else sales[TRADE_COLUMNS].reset_index(drop=True)
-    st.session_state.trades = trades
-    trades.to_csv(TRADES_FILE, index=False)
-    remaining_positions.to_csv(SAVE_FILE, index=False)
+    history = st.session_state.trades
+    st.session_state.trades = (
+        pd.concat([history, sales[TRADE_COLUMNS]], ignore_index=True)
+        if not history.empty
+        else sales[TRADE_COLUMNS].reset_index(drop=True)
+    )
+    st.session_state.saved_positions = remaining_positions
     load_positions(remaining_positions)
 
 
 def set_steps(steps):
-    """Use a new set of daily step counts and keep them for next time."""
+    """Use a new set of daily step counts."""
     st.session_state.steps = steps
-    set_cashed_out(0.0)  # New step data starts a new Step fund.
-    if steps is None:
-        STEPS_FILE.unlink(missing_ok=True)
-    else:
-        steps.rename("Steps").rename_axis("Date").to_csv(STEPS_FILE)
+    st.session_state.cashed_out = 0.0  # New step data starts a new Step fund.
 
 
 def set_cashed_out(amount):
     """Record the total profit cashed out of the Step fund so far."""
     st.session_state.cashed_out = amount
-    if amount:
-        CASH_OUT_FILE.write_text(json.dumps({"cashed_out": amount}))
-    else:
-        CASH_OUT_FILE.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Saving: everything is kept in the viewer's own browser (see storage.py)
+# ---------------------------------------------------------------------------
+DEFAULT_SETTINGS = {
+    "capital": 100_000.0,
+    "gross_limit": 150,
+    "goal": "Moderately net long (net near +30%)",
+}
+
+
+def data_to_save():
+    """Everything AlphaScope keeps between visits, as plain JSON values."""
+    return {
+        "version": 1,
+        "settings": {name: st.session_state[name] for name in DEFAULT_SETTINGS},
+        "positions": storage.table_to_records(
+            st.session_state.saved_positions, ["Entry date"]
+        ),
+        "trades": storage.table_to_records(
+            st.session_state.trades, ["Entry date", "Exit date"]
+        ),
+        "steps": storage.steps_to_dict(st.session_state.steps),
+        "cashed_out": float(st.session_state.cashed_out),
+    }
+
+
+def load_saved(stored):
+    """Fill the app with what this browser saved last time, or the defaults."""
+    data = stored.get("data") or {}
+    st.session_state.storage_available = stored.get("available", False)
+
+    settings = {**DEFAULT_SETTINGS, **(data.get("settings") or {})}
+    st.session_state.capital = max(float(settings["capital"]), 1_000.0)
+    st.session_state.gross_limit = min(max(int(settings["gross_limit"]), 50), 300)
+    st.session_state.goal = settings["goal"] if settings["goal"] in GOALS else DEFAULT_SETTINGS["goal"]
+
+    st.session_state.saved_positions = None
+    load_positions(SAMPLE_POSITIONS)
+    if data.get("positions"):
+        positions = storage.records_to_table(
+            data["positions"], POSITION_COLUMNS, ["Entry date"]
+        )
+        positions["Shares"] = positions["Shares"].astype(float)
+        st.session_state.saved_positions = positions
+        load_positions(positions)
+
+    trades = storage.records_to_table(
+        data.get("trades"), TRADE_COLUMNS, ["Entry date", "Exit date"]
+    )
+    for column in ["Shares", "Entry price ($)", "Exit price ($)", "Profit / loss ($)"]:
+        trades[column] = trades[column].astype(float)
+    st.session_state.trades = trades
+    st.session_state.steps = storage.dict_to_steps(data.get("steps"))
+    st.session_state.cashed_out = float(data.get("cashed_out") or 0.0)
 
 
 def signed_money(value, decimals=0):
@@ -142,37 +174,30 @@ st.caption(
     "simulator: its signals and suggestions are not investment advice."
 )
 
-# On first load, use the saved portfolio if there is one, otherwise the sample.
-if "base_positions" not in st.session_state:
+# Load what this browser saved last time. The browser answers within a
+# moment of the page opening; until then there's nothing to show yet. After
+# that, every run writes the current data back, so a change is kept as soon
+# as it's made.
+loaded = st.session_state.get("browser_loaded", False)
+stored = storage.sync(data_to_save() if loaded else None)
+if not loaded:
+    if stored is None:
+        st.html(ui.skeleton())
+        st.stop()
     try:
-        load_positions(read_positions(SAVE_FILE))
+        load_saved(stored)
     except Exception:
-        load_positions(SAMPLE_POSITIONS)
-
-# Closed trades are kept on this computer.
-if "trades" not in st.session_state:
-    st.session_state.trades = read_trades()
-
-# Step counts from an earlier upload are kept on this computer.
-if "steps" not in st.session_state:
-    try:
-        st.session_state.steps = pd.read_csv(
-            STEPS_FILE, index_col="Date", parse_dates=True
-        )["Steps"]
-    except Exception:
-        st.session_state.steps = None
-    try:
-        st.session_state.cashed_out = json.loads(CASH_OUT_FILE.read_text())["cashed_out"]
-    except Exception:
-        st.session_state.cashed_out = 0.0
+        load_saved({"available": True, "data": {}})
+        ui.flash("Your saved data couldn't be read, so the sample portfolio is shown.", icon="⚠️")
+    st.session_state.browser_loaded = True
 
 with st.sidebar:
     st.header("Portfolio settings")
     capital = st.number_input(
         "Portfolio capital ($)",
         min_value=1_000.0,
-        value=100_000.0,
         step=1_000.0,
+        key="capital",
         format="%.2f",
         help="The total amount of money the simulated fund manages.",
     )
@@ -180,8 +205,8 @@ with st.sidebar:
         "Maximum gross exposure (%)",
         min_value=50,
         max_value=300,
-        value=150,
         step=10,
+        key="gross_limit",
         help=(
             "Gross exposure is long weight plus short weight. Above 100% means "
             "the portfolio uses leverage."
@@ -190,7 +215,7 @@ with st.sidebar:
     goal = st.selectbox(
         "Portfolio goal",
         list(GOALS.keys()),
-        index=1,
+        key="goal",
         help="Used on the Ideas tab to suggest what kind of position to add next.",
     )
 
@@ -236,18 +261,24 @@ edited_positions = edited_positions[
 with st.sidebar:
     st.header("Save and load")
     save_column, reset_column = st.columns(2)
-    if save_column.button("Save", use_container_width=True, help="Keep these positions for next time."):
-        edited_positions.to_csv(SAVE_FILE, index=False)
-        load_positions(edited_positions.reset_index(drop=True))
-        st.toast("Portfolio saved. It loads automatically next time.", icon="✅")
+    if save_column.button(
+        "Save",
+        use_container_width=True,
+        help="Keep these positions in this browser for next time.",
+    ):
+        st.session_state.saved_positions = edited_positions.reset_index(drop=True)
+        load_positions(st.session_state.saved_positions)
+        ui.flash("Portfolio saved. It loads automatically next time.")
+        st.rerun()
     if reset_column.button(
         "Reset",
         use_container_width=True,
         help="Go back to the sample portfolio and clear your trade history.",
     ):
-        SAVE_FILE.unlink(missing_ok=True)
-        TRADES_FILE.unlink(missing_ok=True)
-        st.session_state.trades = pd.DataFrame(columns=TRADE_COLUMNS)
+        st.session_state.saved_positions = None
+        st.session_state.trades = storage.records_to_table(
+            [], TRADE_COLUMNS, ["Entry date", "Exit date"]
+        )
         load_positions(SAMPLE_POSITIONS)
         ui.flash("Back to the sample portfolio.")
         st.rerun()
@@ -280,7 +311,7 @@ with st.sidebar:
         help=(
             "Apple Health export.zip, a Fitbit or Google Fit export, or any CSV "
             "with a date column and a steps column. See the Step fund tab for "
-            "how to export. The file stays on this computer."
+            "how to export. Only the daily step totals are kept, in your browser."
         ),
     )
     if step_file is not None and st.session_state.get("last_step_upload") != step_file.file_id:
@@ -1388,8 +1419,9 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                 "and a steps column, for example `Date` and `Steps`."
             )
             st.caption(
-                "Your health data stays on this computer. It is not uploaded "
-                "anywhere and is not included in the GitHub repository."
+                "Your export is read once to count daily steps. Only those "
+                "daily totals are kept, in your own browser. They are not "
+                "stored on the server or in the GitHub repository."
             )
         elif step_credit.empty:
             st.info(

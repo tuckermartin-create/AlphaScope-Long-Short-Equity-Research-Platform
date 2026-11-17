@@ -31,7 +31,10 @@ investors, and aspiring equity research analysts.
   in a table. The entry price is looked up from the entry date. The app starts
   with a 12-position sample portfolio (8 longs, 4 shorts).
 - **Save and load.** Save the portfolio so it loads next time, reset to the
-  sample, or download and upload it as a CSV file.
+  sample, or download and upload it as a CSV file. Saved positions, sidebar
+  settings, trade history, and Step fund data are kept in the viewer's own
+  browser, so each person has their own portfolio and it survives reloads,
+  restarts, and app updates. Nothing personal is stored on the server.
 - **Overview tab.** Portfolio value against the S&P 500, profit or loss by
   position, and exposure by position.
 - **Holdings tab.** Entry price, live price, today's change, value, weight,
@@ -42,7 +45,7 @@ investors, and aspiring equity research analysts.
   trade history. The app shows realized profit (from closed trades)
   separately from unrealized profit (on positions still held), and both count
   toward portfolio value. The history can be downloaded as a CSV file and is
-  kept on the user's computer.
+  kept in the user's browser.
 - **Reasoning tab.** Two signals for each stock, and whether they support or
   conflict with the chosen side:
   - *Trend:* price against its 200-day average, 50-day against 200-day
@@ -67,8 +70,9 @@ investors, and aspiring equity research analysts.
   rate (10,000 steps = $1). Step credit works like bonus money: it is
   invested in the portfolio and can never be cashed out, but the profit it
   makes can. The tab shows daily steps, locked step credit, the profit
-  available to cash out, and how the credit has grown. Step data stays on the
-  user's computer and is not part of this repository.
+  available to cash out, and how the credit has grown. Only daily step totals
+  are kept, in the user's browser; they are not stored on the server or in
+  this repository.
 - **News tab.** Recent Yahoo Finance headlines for selected holdings.
 - **Valuation screen tab.** Compare any stock's live price with the user's
   fair-value estimate to get a long, short, or neutral research flag.
@@ -107,6 +111,8 @@ The app follows one visual direction, called "Clear ledger":
 - `ui.py` — fonts, styles, and reusable page pieces (headline, cards, empty
   and loading states, confirmation messages).
 - `step_tracker.py` — reads step counts from health app exports.
+- `storage.py` and `browser_storage/` — save each viewer's data in their own
+  browser.
 - `.streamlit/config.toml` — the color theme and the upload size limit.
 
 ## Run locally
