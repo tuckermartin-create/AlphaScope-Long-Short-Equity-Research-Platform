@@ -13,29 +13,27 @@ from html import escape
 import streamlit as st
 
 
-# Two palettes: the design is light, but the pieces below must stay readable
-# if Streamlit is showing its dark theme (for example before a restart picks
-# up .streamlit/config.toml, or if someone switches theme in the menu).
-LIGHT = {
-    "ink": "#14171A", "muted": "#5B6470", "border": "#E5E3DC", "card": "#FFFFFF",
-    "action": "#1F4FD8", "gain": "#0E8A5F", "loss": "#C8372D",
-    "skeleton_a": "#EFEDE6", "skeleton_b": "#F7F6F1",
-    "disabled_bg": "#C9CDD3", "disabled_text": "#5B6470",
+# Colors are written relative to the page's own text color ("currentColor"),
+# so every custom piece is readable whether Streamlit shows its light or dark
+# theme. Streamlit can't reliably report which theme the viewer sees (the
+# browser's dark mode and the app's light theme can disagree), so the styles
+# must not depend on knowing it.
+COLORS = {
+    # Text uses the theme's own text color.
+    "ink": "inherit",
+    "muted": "color-mix(in srgb, currentColor 62%, transparent)",
+    # Cards and lines are faint tints of the text color.
+    "card": "color-mix(in srgb, currentColor 4%, transparent)",
+    "border": "color-mix(in srgb, currentColor 14%, transparent)",
+    "skeleton_a": "color-mix(in srgb, currentColor 6%, transparent)",
+    "skeleton_b": "color-mix(in srgb, currentColor 12%, transparent)",
+    # Green and red are blended toward the text color: darker on a light
+    # page, lighter on a dark page, so they keep their contrast in both.
+    "gain": "color-mix(in srgb, #0E8A5F 70%, currentColor)",
+    "loss": "color-mix(in srgb, #C8372D 75%, currentColor)",
+    # The action color sits behind white text, so it works on both themes.
+    "action": "#1F4FD8",
 }
-DARK = {
-    "ink": "#F2F2F0", "muted": "#A9AEB6", "border": "#343841", "card": "#1A1D24",
-    "action": "#4F74E8", "gain": "#3DBE8B", "loss": "#F0766A",
-    "skeleton_a": "#1E2128", "skeleton_b": "#2A2E37",
-    "disabled_bg": "#343841", "disabled_text": "#A9AEB6",
-}
-
-
-def palette():
-    """The colors that match the theme Streamlit is currently showing."""
-    try:
-        return DARK if st.context.theme.type == "dark" else LIGHT
-    except Exception:
-        return LIGHT
 
 
 STYLES = """
@@ -62,16 +60,29 @@ button[kind="primary"], button[data-testid="stBaseButton-primary"] {{
     background: {action} !important; border-color: {action} !important; color: #FFFFFF !important;
 }}
 button[kind="primary"]:disabled, button[data-testid="stBaseButton-primary"]:disabled {{
-    background: {disabled_bg} !important; border-color: {disabled_bg} !important;
-    color: {disabled_text} !important;
+    opacity: 0.45; cursor: not-allowed;
 }}
 
-/* Numbers and labels wrap instead of being cut off on narrow screens. */
-[data-testid="stMetricValue"] {{ font-size: 1.75rem; }}
-[data-testid="stMetricValue"] > div, [data-testid="stMetricLabel"] p,
-[data-testid="stMetricLabel"] > div {{
-    white-space: normal !important; overflow: visible !important; text-overflow: clip !important;
+/* Keep metric values inside their own column instead of running into neighbors. */
+[data-testid="stMetric"] {{
+    min-width: 0;
+    padding: 4px 8px;
 }}
+[data-testid="stMetricValue"] {{
+    font-size: clamp(1.25rem, 1.8vw, 1.75rem);
+    line-height: 1.12;
+    overflow-wrap: anywhere;
+}}
+/* Long values wrap inside their own box and push the content below down,
+   instead of spilling over the next number. */
+[data-testid="stMetric"] {{ min-width: 0; }}
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] > div,
+[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p,
+[data-testid="stMetricLabel"] > div {{
+    white-space: normal !important; overflow: hidden !important; text-overflow: clip !important;
+    overflow-wrap: anywhere; height: auto !important; line-height: 1.2 !important;
+}}
+[data-testid="stMetricDelta"] {{ white-space: normal !important; }}
 
 /* Touch targets of at least 44px. */
 .stButton button, .stDownloadButton button, [data-testid="stFileUploader"] button,
@@ -104,15 +115,15 @@ summary:focus-visible, a:focus-visible {{
 
 .as-card {{
     background: {card}; border: 1px solid {border}; border-radius: 12px;
-    padding: 24px; margin-bottom: 16px;
+    padding: 24px; margin-bottom: 16px; color: {ink};
 }}
-.as-card h3 {{ margin: 0 0 12px; font-size: 20px; padding: 0; }}
+.as-card h3 {{ margin: 0 0 12px; font-size: 20px; padding: 0; color: {ink}; }}
 .as-row {{
     display: flex; justify-content: space-between; gap: 16px;
     padding: 12px 0; border-top: 1px solid {border}; font-size: 15px;
 }}
 .as-row:first-of-type {{ border-top: none; }}
-.as-row strong {{ font-weight: 600; }}
+.as-row strong {{ font-weight: 600; color: {ink}; }}
 
 .as-empty {{
     background: {card}; border: 1px dashed {border}; border-radius: 12px;
@@ -140,7 +151,7 @@ summary:focus-visible, a:focus-visible {{
 
 def apply_styles():
     """Add the app's fonts and styles to the page."""
-    st.html(STYLES.format(**palette()))
+    st.html(STYLES.format(**COLORS))
 
 
 # ---------------------------------------------------------------------------

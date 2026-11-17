@@ -1078,14 +1078,18 @@ def dashboard(positions, capital, gross_limit, target_net, steps):
                     reasons.append(f"your fair value implies {new_gap:+.0f}%")
                 reason_text = ", and ".join(reasons)
 
-                after = st.columns(4)
-                after[0].metric("Live price", f"${new_price:,.2f}")
-                after[1].metric("Trend / fundamentals", f"{new_trend} / {new_fundamentals}")
-                after[2].metric(
+                # This sits in half the page width, so use two rows of two
+                # numbers instead of one cramped row of four.
+                stock_row = st.columns(3, gap="medium")
+                stock_row[0].metric("Live price", f"${new_price:,.2f}")
+                stock_row[1].metric("Trend", new_trend)
+                stock_row[2].metric("Fundamentals", new_fundamentals)
+                exposure_row = st.columns(3, gap="medium")
+                exposure_row[0].metric(
                     "Net after", f"{new_net:+.0f}%",
                     f"{new_direction * new_weight:+.0f}%", delta_color="off",
                 )
-                after[3].metric(
+                exposure_row[1].metric(
                     "Gross after", f"{new_gross:.0f}%", f"{new_weight:+.0f}%",
                     delta_color="off",
                 )
